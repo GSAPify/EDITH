@@ -8,10 +8,64 @@
       "status": "completed",
       "completed_at": "2026-07-05T14:35:13.548Z",
       "duration_ms": 312067
+    },
+    {
+      "agent_id": "a4f0cf53af38b3e72",
+      "agent_type": "oh-my-claudecode:executor",
+      "started_at": "2026-07-05T14:36:40.899Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-05T14:45:20.958Z",
+      "duration_ms": 520059
+    },
+    {
+      "agent_id": "a909f49971623b400",
+      "agent_type": "oh-my-claudecode:executor",
+      "started_at": "2026-07-05T14:36:52.327Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-05T14:39:48.905Z",
+      "duration_ms": 176578
+    },
+    {
+      "agent_id": "a7e86e54376c5d24d",
+      "agent_type": "oh-my-claudecode:executor",
+      "started_at": "2026-07-05T14:37:26.461Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-05T14:40:26.421Z",
+      "duration_ms": 179960
+    },
+    {
+      "agent_id": "ad09161652ff77582",
+      "agent_type": "oh-my-claudecode:executor",
+      "started_at": "2026-07-05T14:37:27.198Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-05T14:42:21.825Z",
+      "duration_ms": 294627
+    },
+    {
+      "agent_id": "a15fe0c2629f03fc9",
+      "agent_type": "oh-my-claudecode:executor",
+      "started_at": "2026-07-05T14:37:37.300Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-05T14:42:45.935Z",
+      "duration_ms": 308635
+    },
+    {
+      "agent_id": "af0473bd5c539d1ed",
+      "agent_type": "oh-my-claudecode:executor",
+      "started_at": "2026-07-05T14:37:47.414Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-05T14:40:34.293Z",
+      "duration_ms": 166879
     }
   ],
-  "total_spawned": 1,
-  "total_completed": 9,
+  "total_spawned": 7,
+  "total_completed": 63,
   "total_failed": 0,
-  "last_updated": "2026-07-05T14:35:13.652Z"
+  "last_updated": "2026-07-05T14:46:47.226Z"
 }

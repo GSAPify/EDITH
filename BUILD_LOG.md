@@ -110,8 +110,26 @@ Spec depth this session: DEEP on 0 (north-star) + 1 (memory/brain); INTERFACE-le
 ### Session 1 work log
 - [x] Created `~/gitstuff/EDITH`, git init, wired remote `GSAPify/EDITH`.
 - [x] Scaffolding: `.gitignore`, `README.md`, `STATE.md`, `BUILD_LOG.md`.
-- [ ] Wave 1 (opus agent): `00-north-star.md` + `SESSION-PROTOCOL.md` + spec `_TEMPLATE.md`.
-- [ ] Wave 2 (parallel agents): `01`–`06` slice specs.
-- [ ] Commit + push each wave.
+- [x] Wave 1 (opus agent): `00-north-star.md` + `SESSION-PROTOCOL.md` + spec `_TEMPLATE.md`.
+- [x] Wave 2 (6 parallel agents): `01`–`06` slice specs. Slice 1 opus/deep (555 ln), 2–6 sonnet.
+- [x] Reconciled: no terminology drift, no unicorn claims, deferred decisions resolved.
+- [x] Commit + push (branch `spec/session-1-foundation`).
+
+### Session 1 outcome — SPEC SET COMPLETE
+Full spec set authored (~2950 lines across 8 docs). Notable decisions the slice agents resolved
+during authoring:
+- **Slice 1 storage** — Kuzu **native HNSW vector index** as primary (verified against current
+  Kuzu docs via context7), `sqlite-vec` as documented fallback. Resolves north-star OQ#1.
+- **Slice 6 terminal driver** — hybrid: **spawn-and-own a shell process** for OMC/Claude Code
+  launches (reliable, stdout capture, knows when `cd` finished); **Terminal.app via `osascript`**
+  for the "open a terminal I can watch" path. Resolves north-star OQ#2. (iTerm still not required.)
+- **Slice 4** — spec mandates a **prototype/spike to verify the OMC/Claude Code event source**
+  before building the SessionBus interface (highest-uncertainty piece).
+
+**Method note:** parallel-agent authoring worked well; agents wrote to disk and returned summaries
+only (budget discipline). A single giant Write in the main thread timed out earlier — lesson:
+chunk writes / delegate authoring. Commit-early-and-often saved the session after that timeout.
+
+**Next session (Session 2):** build **Slice 1 (Memory + Brain)**. Needs Bifrost base_url + key.
 
 <!-- Next sessions append below this line -->
