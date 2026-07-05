@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+.python-version
+
+# Secrets / local state — NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.kuzu/
+edith.log
+logs/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
