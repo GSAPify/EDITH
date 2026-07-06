@@ -1,0 +1,40 @@
+[project]
+name = "edith"
+version = "0.1.0"
+description = "EDITH — always-on local-first macOS assistant. Slice 1: Memory store."
+requires-python = ">=3.11"
+dependencies = [
+    "kuzu>=0.11",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["edith"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["edith", "tests"]
+exclude = [".venv", "**/__pycache__"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
