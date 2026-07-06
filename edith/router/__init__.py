@@ -1,0 +1,12 @@
+"""Router — EDITH's model-call gateway over the Bifrost adapter (spec 05).
+
+Every model call in EDITH routes through ``model_call(messages, tier_hint)``.
+This slice ships the single-tier passthrough the north-star (§7) permits until
+Slice 5 adds the two-call latency-masking mechanics: the tier hint maps straight
+to a Bifrost model id and one HTTP call is made. The surface stays stable so
+Slice 5 can replace the internals without touching callers.
+"""
+
+from edith.router.bifrost import ModelResponse, Router, Tier
+
+__all__ = ["ModelResponse", "Router", "Tier"]
