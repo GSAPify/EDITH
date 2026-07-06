@@ -133,3 +133,55 @@ chunk writes / delegate authoring. Commit-early-and-often saved the session afte
 **Next session (Session 2):** build **Slice 1 (Memory + Brain)**. Needs Bifrost base_url + key.
 
 <!-- Next sessions append below this line -->
+
+---
+
+## Session 2 — 2026-07-06 — Slice 1 build: Memory store foundation (strict TDD)
+
+Branch: `build/slice-1-memory-brain`. Iron law honored throughout: red → verify the
+right failure → minimal green → refactor. Real embedded Kuzu 0.11.3, no mocks.
+
+### What shipped (all green)
+- **Project scaffold** — `uv` project, Python 3.11.14, `kuzu`; dev `pytest`/`ruff`/`pyright`
+  all configured in `pyproject.toml` with `.venv` excluded from ruff+pyright. `.env.example`
+  with Bifrost placeholders (no real secrets). Package `edith/memory/` + `tests/`.
+- **Graph store** (`store.py`) — Owner/Project/Repo/Person/Fact nodes +
+  `works_on`/`owns`/`knows`/`relates_to` edges. `remember` (idempotent upsert),
+  `recall` (substring anchor match + 1-hop `relates_to` traversal). Sync (documented).
+- **Embeddings** (`embeddings.py`) — `Embedder` Protocol + `LocalEmbedder`
+  (fastembed / all-MiniLM-L6-v2, 384-dim, offline).
+- **Vector recall** (`vector.py`) — `VectorMemoryStore` with Kuzu native HNSW,
+  `build_vector_index()` + `semantic_recall(query, k)`.
+- **Never-persist secrets filter** (`secrets.py`) — runs FIRST in `remember`; strips
+  labelled secrets / PEM / provider tokens to `[REDACTED]`, keeps the fact.
+- 12 tests: `uv run pytest` → 12 passed · ruff clean · pyright 0 errors.
+
+### Commits
+`0d60308` scaffold · `9d94f19` graph store · `7deb7a8` embedder+vector ·
+`4c9c7b7` secrets filter · `2e3aa45` build-once vector index + verified reopen recall.
+
+### Decisions / surprises
+- **Sync over async** this run — no async consumer yet, Kuzu is blocking. Contract goes
+  async when edithd lands (noted in code).
+- **fastembed, not sentence-transformers** — same model/dim, no torch, light install.
+- **BIG surprise — Kuzu 0.11.3 vector index is BUILD-ONCE, not rebuildable.**
+  `DROP_VECTOR_INDEX` + `CREATE_VECTOR_INDEX` under the same name fails
+  "Index … already exists" *even within one session* (stale catalog entry survives the
+  drop). Verified with isolated probes. The persisted index IS directly queryable after a
+  fresh reopen with no rebuild (proven). This confirms the spec's static-HNSW maturity
+  caveat and is the concrete trigger for the sqlite-vec fallback → **owner decision needed**
+  (see STATE.md blockers). Removed the drop-on-write path from `remember` that this bug had
+  briefly regressed.
+- Substituted the secrets filter for the optional `compact()` stub — the filter is a
+  safety property of code we built; `compact()` needs Session/Conversation tables + a
+  working-context buffer that don't exist yet (deferred honestly).
+
+### Method note
+Smoke-tested both network deps (Kuzu extension download, fastembed model fetch) BEFORE
+building the vector layer, per the "discover env facts early" discipline — both worked, so
+step 3 was unblocked. Committed after each green step (data-loss insurance).
+
+### Next session (Session 3)
+Continue Slice 1: Brain loop skeleton (bus + recall→decide→remember, Router passthrough),
+then edithd lifecycle + Control API. Add Session/Conversation node tables, then `compact()`.
+Get the vector re-index decision (build-once vs sqlite-vec) and Bifrost creds from owner.

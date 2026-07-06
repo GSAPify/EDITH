@@ -548,15 +548,102 @@ output at build time (not assumptions).
 
 ---
 
-## Completion Record — Memory + Brain — <date>
+## Completion Record — Memory + Brain — 2026-07-06 — **PARTIAL**
 
-> Fill this at session end per `../SESSION-PROTOCOL.md` §4 (canonical template lives there).
-> Leave empty until the slice is built.
+> Status: **PARTIAL.** Memory *store* foundation is built and green. Brain loop,
+> edithd daemon, Control API, Router, and `compact()` are NOT built this session.
 
-- **What shipped:**
-- **How it works:**
-- **Key decisions made during build:**
-- **Deviations from spec + why:**
-- **Files created / changed:**
-- **Verification / tests run + results:**
-- **Follow-ups / known gaps:**
+**What shipped:** The Memory *store* foundation, strict-TDD, against real embedded
+Kuzu 0.11.3 (no mocks). A `MemoryStore` persists a small typed property graph
+(Owner/Project/Repo/Person/Fact + `works_on`/`owns`/`knows`/`relates_to` edges),
+with `remember(nodes|edges)` (upsert, idempotent per id) and a graph-traversal
+`recall(query)` (substring anchor match + 1-hop `relates_to` traversal to pull
+related Facts). A `VectorMemoryStore` subclass adds a local offline embedder and
+Kuzu's native HNSW vector index for semantic `semantic_recall(query, k)`. A
+never-persist secrets filter runs FIRST in `remember`, stripping credential-shaped
+material before any write. Recall-across-restart is proven for both graph and
+semantic recall (reopen the on-disk DB, recall the stored fact).
+
+**How it works:**
+- `edith/memory/store.py` — `MemoryStore` opens Kuzu, creates node/rel tables
+  (`IF NOT EXISTS`), and does all Cypher via narrowed `_run`/`_rows` helpers.
+  `recall` scans text props for the query substring (structural signal #1/#3),
+  collects anchors, then traverses `(:Fact)-[:relates_to]->(anchor)` inbound.
+  `sanitize_node` runs every string prop through the secrets filter first.
+- `edith/memory/secrets.py` — regex filter: labelled `key: value`/`key = value`
+  secret assignments, PEM private-key headers, and provider token prefixes
+  (`GOCSPX-`, `sk-…`, `ghp_`, `github_pat_`) → `[REDACTED]`, preserving the
+  surrounding prose so the *fact of it* survives.
+- `edith/memory/embeddings.py` — `Embedder` Protocol + `LocalEmbedder`
+  (fastembed / `all-MiniLM-L6-v2`, 384-dim, ONNX, offline; model fetched once).
+- `edith/memory/vector.py` — `VectorMemoryStore(MemoryStore)`: `INSTALL/LOAD
+  vector`, adds a `FLOAT[384]` `embedding` column to Fact, embeds sanitized Fact
+  text on `remember`, `build_vector_index()` (build-once), `semantic_recall` via
+  `QUERY_VECTOR_INDEX` (returns `[]` if no index yet — graph recall covers the gap).
+
+**Key decisions made during build:**
+- **Sync, not async, this run.** No async consumer exists yet (Brain/edithd are
+  later slices) and Kuzu is blocking; async would drag in `pytest-asyncio` for zero
+  benefit now. Documented in `store.py`: the public Memory contract becomes `async`
+  when edithd lands; the queries here are the source of truth.
+- **fastembed over sentence-transformers** for local embeddings — same
+  `all-MiniLM-L6-v2` 384-dim vectors, ONNX-light, no torch (~2GB) install.
+- Included **Owner** node (spec's singleton recall anchor) alongside the
+  Project/Repo/Person/Fact core; deliberately NOT all 10 nodes / 11 edges (YAGNI).
+- `_index_exists()` queries `SHOW_INDEXES()` (DB truth) rather than an in-memory
+  flag, so a reopened store correctly sees a prior session's persisted index.
+
+**Deviations from spec + why:**
+- **Substituted the never-persist secrets filter for the `compact()` stub** in the
+  optional step-4 slot. Rationale: the filter is a load-bearing safety property of
+  `remember` (which we *did* build), whereas a faithful `compact()` needs
+  Session/Conversation node tables + a `derived_from` edge + a token-counted
+  working-context buffer — none of which exist yet, so it would be starting new
+  Slice-1 scope, not finishing it. `compact()` deferred (see Follow-ups).
+- **Vector index is BUILD-ONCE, not rebuildable, on Kuzu 0.11.3.** VERIFIED at build
+  time: `DROP_VECTOR_INDEX` + `CREATE_VECTOR_INDEX` under the same name fails with
+  "Index … already exists" — **even within a single session** (the catalog keeps a
+  stale entry after drop). This confirms the spec's static-HNSW maturity caveat and
+  is the concrete **trigger for the documented sqlite-vec fallback** (incremental
+  inserts, no rebuild). For now: build the index once over existing rows; Facts
+  added afterward are found by graph `recall` until a from-scratch rebuild. The
+  debounced-rebuild cadence in the spec is therefore NOT buildable as written on
+  this Kuzu version — owner decision needed (see Follow-ups).
+- Secrets never-persist test asserts via `recall()` readback (raw secret absent,
+  `[REDACTED]` present), not the spec's fuller "absent from DB file + vector store +
+  logs + bus" sweep. Adequate for the store layer; the bus/log sweep lands with those
+  components.
+- Encryption-at-rest: per task scope, relying on FileVault + a 0700 data dir for v1;
+  the dedicated encrypted APFS volume + Keychain unlock is daemon-lifecycle work (not
+  this run). No custom crypto written.
+
+**Files created / changed:**
+- `pyproject.toml`, `uv.lock`, `.env.example` (Bifrost placeholders — no real secrets)
+- `edith/__init__.py`, `edith/memory/__init__.py`
+- `edith/memory/store.py`, `edith/memory/secrets.py`, `edith/memory/embeddings.py`,
+  `edith/memory/vector.py`
+- `tests/test_graph_store.py`, `tests/test_vector_recall.py`,
+  `tests/test_secrets_filter.py`, `tests/test_remember_never_persists_secrets.py`
+
+**Verification / tests run + results (fresh):**
+- `uv run pytest` → **12 passed**
+- `uv run ruff check edith tests` → **All checks passed**
+- `uv run pyright edith tests` → **0 errors, 0 warnings**
+- Network smoke tests (once): Kuzu `vector` extension installs + round-trips;
+  fastembed `all-MiniLM-L6-v2` → 384-dim. Recall-across-reopen proven for graph
+  (`test_recall_survives_reopen`) and semantic (`test_semantic_recall_after_reopen`).
+
+**Follow-ups / known gaps:**
+- **`compact()` — deferred.** Needs Session + Conversation node tables, a
+  `derived_from` edge, and a token-counted working-context buffer object first.
+- **Vector re-index cadence — BLOCKED on Kuzu 0.11.3.** Drop+recreate of a vector
+  index is unbuildable (verified). OWNER DECISION: (a) accept build-once + periodic
+  full-rebuild-from-scratch, or (b) adopt the spec's **sqlite-vec fallback** for
+  incremental vector inserts. This is the open question the spec said to resolve by
+  measuring — the measurement says drop/recreate does not work at all on this version.
+- Not built this run (later Slice-1 work): Brain loop, edithd daemon + lifecycle,
+  Control API + pause semantics, Router passthrough, the trivial built-in skill,
+  `Guard.redact`/`authorize`/budget, encrypted-volume bring-up.
+- Recall fusion is graph-only + separate `semantic_recall`; the weighted
+  traversal+vector+recency *scoring blend* is not yet implemented (each signal works
+  independently).
