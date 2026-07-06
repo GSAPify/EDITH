@@ -238,3 +238,56 @@ text for the recall shape), written in the same `remember()` as the vector row a
 Continue Slice 1: Brain loop skeleton (bus + recall→decide→remember, Router passthrough), then
 edithd lifecycle + Control API. Add Session/Conversation node tables, then `compact()`.
 Vector re-index blocker is now RESOLVED (sqlite-vec incremental). Still need Bifrost creds.
+
+---
+
+## Session 4 — 2026-07-06 — Slice 1: bus + Router/Bifrost adapter + Brain loop (strict TDD)
+
+Built the three components that turn the Memory store into a working core loop, each red→green
+on `build/slice-1-memory-brain`. Baseline was **14 passed** (docs said 13; reconciled
+empirically). Ended **29 passed, 1 skipped** (+ the live smoke green under `--run-live`).
+
+### 1. Event bus (`edith/bus/`)
+In-process async pub/sub, north-star envelope `Event{topic, ts, source, payload}`.
+`async publish` awaits all matching handlers via `asyncio.gather` (deterministic, no
+`sleep(0)` flakiness), topic-filters, no-ops with no subscribers. 4 tests, RED on missing module.
+
+### 2. Router + Bifrost adapter (`edith/router/`)
+`async model_call(messages, tier_hint) -> ModelResponse` over the Anthropic-compatible gateway
+(`POST {base}/v1/messages`). `httpx.AsyncClient` **constructor-injected** → `MockTransport` seam
+tests request construction / response parse / tier→model map with **no live call**. Retries via
+**tenacity** (`retry_if_exception`: `TransportError` or status ≥ 500; 3 attempts; exp backoff;
+`reraise=True`); **4xx raises immediately** — both directions tested (503-then-200 → 2 calls;
+400 → 1 call, raises). One `@pytest.mark.live` smoke (skipped by default; `.env` loaded only on
+the `--run-live` path so the billable call never fires on a plain `pytest` — cost rule) hit real
+Bifrost: **200, non-empty text, max_tokens=8**. Model ids = the task's verified defaults. 6 unit
++ 1 live. Added `BIFROST_MODEL_*` to `.env.example` + the real gitignored `.env`.
+
+### 3. Brain loop (`edith/brain/`)
+Core loop on `voice.utterance`: `recall` → assemble (preamble + recalled facts + utterance) →
+**redact** (`secrets.sanitize_text` over every message) → `Router.model_call` (single-tier
+SONNET passthrough, north-star §7) → **remember** the exchange (redacted first) → publish
+`brain.decision`. Memory/Router consumed via `Protocol`s. 4 tests with injected fakes over the
+real bus.
+
+### Decisions / notes
+- **Redaction in Brain, not Router** — spec 05 puts the choke-point in Router *once Guard exists*;
+  Guard isn't this slice, so building it = scope creep. Interim: Brain redacts. Deviation logged.
+- **Key from `.env`, not Keychain** — task's verified contract overrides spec's Keychain-only;
+  Keychain = daemon-bring-up work. Key never printed; `sk-bf-*` redacted in output.
+- **Redaction-test RED found a real gap.** Brain was building the remembered Fact from the *raw*
+  utterance (fake Memory doesn't sanitize like the real store) → planted secret leaked into
+  what-was-remembered. Root-cause fix: redact the exchange text in Brain (defense-in-depth), not
+  a test hack.
+- Sync Memory called directly from async Brain (no real concurrency yet; `asyncio.to_thread` is
+  the noted future step). `compact()` still deferred.
+
+### Verification (fresh)
+- `uv run pytest` → **29 passed, 1 skipped** · live smoke `--run-live` → **1 passed**
+- `uv run ruff check edith tests` → **All checks passed**
+- `uv run pyright edith` → **0 errors, 0 warnings**
+
+### Next session (Session 5)
+**`edithd` daemon lifecycle + Control API** (unix-socket `pause`/`resume`/`kill`/`status`,
+launchd plist, encrypted-volume mount, pause-suspends-Memory). Then `compact()` (needs
+Session/Conversation node tables + working-context buffer) and **Guard**. Rotate the Bifrost key.

@@ -685,3 +685,91 @@ the test as a deliberate deviation. Net: 11 unchanged + 1 rewritten + 1 new = 13
 All checks passed · `uv run pyright edith` → 0 errors, 0 warnings. sqlite-vec extension
 loading + KNN round-trip smoke-tested on-machine before building (macOS stdlib `sqlite3`
 allows extension loading here — no blocker).
+
+---
+
+## Completion Record — Bus + Router + Brain loop — 2026-07-06 — **DONE (edithd = next)**
+
+> Status: **DONE** for the event bus, the Router/Bifrost adapter, and the Brain loop
+> passthrough — all strict-TDD (red → right-reason fail → minimal green). **edithd daemon
+> lifecycle + Control API (unix-socket pause/resume/kill/status) is the next step**, and is the
+> only remaining major Slice-1 component besides `compact()`.
+
+**What shipped:**
+- **`edith/bus/`** — in-process async pub/sub carrying the north-star envelope
+  `Event{topic, ts, source, payload}`. `subscribe(topic, handler)` + `async publish(topic,
+  source, payload)`; `publish` awaits every matching handler via `asyncio.gather` (deterministic
+  multi-subscriber delivery), topic-filters, and no-ops on a topic with no subscribers.
+- **`edith/router/`** — `async model_call(messages, tier_hint) -> ModelResponse` over the
+  Anthropic-compatible Bifrost gateway (`POST {base}/v1/messages`, `x-api-key` /
+  `anthropic-version: 2023-06-01` headers, `{model, max_tokens, messages}` body, parses
+  `.content[0].text` + `.usage.{input,output}_tokens`). `httpx.AsyncClient` is **constructor-
+  injected** (the `MockTransport` seam). Transient failures retried with **tenacity**
+  (`retry_if_exception` on `httpx.TransportError` or `HTTPStatusError` status ≥ 500, 3 attempts,
+  exponential backoff, `reraise=True`); **4xx raises immediately, no retry**. `Tier` enum
+  (HAIKU/SONNET/OPUS) → model-id map. Added `BIFROST_MODEL_{HAIKU,SONNET,OPUS}` to `.env.example`
+  (+ the real gitignored `.env`).
+- **`edith/brain/`** — the core loop on a `voice.utterance` event: `Memory.recall(utterance)` →
+  assemble (system preamble + recalled facts + utterance) → **redact** every message via
+  `secrets.sanitize_text` → `Router.model_call` (single-tier SONNET passthrough, north-star §7)
+  → **remember** the exchange (redacted first) → publish `brain.decision {intent, action,
+  tier_used, answer}`. Subscribes itself to the bus on construction. Memory/Router are consumed
+  via `Protocol`s (`MemoryLike`/`RouterLike`) so the real classes satisfy them structurally.
+
+**Tests (each watched fail RED first, for the right reason):**
+- `tests/test_bus.py` (4) — RED on `ModuleNotFoundError: edith.bus`. deliver-to-subscriber,
+  multiple-subscribers, topic-filtering isolates, no-subscriber no-op.
+- `tests/test_router.py` (6 unit + 1 live) — RED on `ModuleNotFoundError: edith.router`. Parses
+  text+usage; request construction (method/URL/headers/body via `MockTransport`); tier→model
+  map (parametrized ×3); **retry-on-503-then-200 succeeds** (asserts 2 calls); **4xx raises with
+  no retry** (asserts 1 call). One `@pytest.mark.live` smoke test, skipped by default, verifying
+  a real 200 + non-empty text at `max_tokens=8` (cost rule) — ran once with `--run-live`, green.
+- `tests/test_brain_loop.py` (4) — RED on `ModuleNotFoundError: edith.brain`. recall consulted
+  with the utterance; model call made + `brain.decision` published + recalled fact present in
+  the assembled messages; exchange remembered; **redaction runs before the model call AND before
+  remember** (planted `GOCSPX-…` secret absent from both the Router payload and the remembered
+  Fact, `[REDACTED]` present). The redaction test's first RED exposed a real gap — Brain had been
+  building the remembered Fact from the *raw* utterance; fixed by redacting the exchange text in
+  Brain (defense-in-depth, not relying on the store's own sanitizer).
+
+**Key decisions:**
+- **Redaction lives in Brain this slice, not Router.** Spec 05 §Open questions makes the
+  redact choke-point a Router responsibility once **Guard** exists; Guard is not in this slice, so
+  building it would be scope creep. Brain reuses `secrets.sanitize_text`. Deviation recorded here;
+  moves into Router/Guard when Guard lands.
+- **API key from `os.environ` / `.env`, not Keychain.** Spec 05 says the key is Keychain-only;
+  the task's verified contract reads `BIFROST_API_KEY` from `.env`. Followed the task. Keychain
+  retrieval is daemon-bring-up work (deferred). The key is never printed/logged; `sk-bf-*`
+  redacted in any output.
+- **Model ids = the task's verified defaults** (`claude-haiku-4-5-20251001`,
+  `claude-sonnet-4-6`, `claude-opus-4-8`), not the spec's illustrative `claude-*-4-5` strings.
+- **Sync Memory called directly from async Brain.** No real concurrency in this slice and the
+  tests inject fakes; `asyncio.to_thread` around the blocking Kuzu calls is the honest future step
+  (noted in `loop.py`), not built now.
+- **`--run-live` gate + no auto-`.env`-load in conftest.** The live test is skipped unless
+  `--run-live`, and `.env` is loaded **only** on that path — otherwise the billable call would
+  fire on every plain `uv run pytest`, breaking the cost rule.
+
+**Deviations from spec:** redaction placement (Brain, not Router — see above); API key source
+(`.env`, not Keychain — see above). No two-call masking / streaming / tier-override heuristics /
+Guard budget gate — all explicitly Slice-5 or later; this is the north-star §7 passthrough.
+
+**Files created:** `edith/bus/{__init__,event_bus}.py`, `edith/router/{__init__,bifrost}.py`,
+`edith/brain/{__init__,loop}.py`, `tests/conftest.py`, `tests/test_bus.py`,
+`tests/test_router.py`, `tests/test_brain_loop.py`. **Changed:** `pyproject.toml` (+httpx,
++tenacity, +pytest-asyncio, `asyncio_mode=auto`, `live` marker), `uv.lock`, `.env.example`.
+
+**Verification (fresh):** `uv run pytest` → **29 passed, 1 skipped** (the live smoke) ·
+live smoke via `--run-live` → **1 passed** (real Bifrost 200, non-empty text, max_tokens=8) ·
+`uv run ruff check edith tests` → **All checks passed** · `uv run pyright edith` → **0 errors,
+0 warnings**.
+
+**Follow-ups / next step:**
+- **`edithd` daemon lifecycle + Control API — NEXT.** Process bring-up (Keychain secrets → mount
+  encrypted volume → open Kuzu → bus → subsystems → Control API server), unix-socket
+  `pause`/`resume`/`kill`/`status` (locked shape), pause-suspends-Memory decision, launchd plist.
+- `compact()` still deferred (needs Session/Conversation node tables + a token-counted
+  working-context buffer).
+- Guard (`redact`/`authorize`/budget) not built — Brain's redaction is the interim; the autonomy
+  gate + budget gate + `Router.budget_check`/opus escalation land with Guard.
+- Router two-call masking, streaming, tier-override heuristics, `supervised_reason` — Slice 5.
