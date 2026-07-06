@@ -32,3 +32,6 @@ logs/
 # Editor
 .idea/
 .vscode/
+
+# OMC runtime session state (never commit)
+.omc/
