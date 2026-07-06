@@ -7,8 +7,6 @@ observable contract: subscribe, publish, multiple subscribers, topic filtering.
 
 from __future__ import annotations
 
-import pytest
-
 from edith.bus import Event, EventBus
 
 
