@@ -205,6 +205,13 @@ Brain is not involved in barge-in — it is handled entirely within VoiceIO befo
 reaches the bus. Brain simply receives a new `voice.utterance` and treats the prior response
 as abandoned.
 
+**Barge-in ≠ steering.** Barge-in only stops TTS *audio*; it never stops in-flight compute.
+When a supervised reasoning session is active (opus running under a `SupervisedSession`, see
+Slice 5 §Supervised reasoning), the new `voice.utterance` is *also* routed to
+`SupervisedSession.steer()` so the sonnet arbiter can decide whether to cancel/redirect opus.
+Cancelling audio and cancelling the reasoning task are two separate actions; VoiceIO owns the
+first, the Router arbiter owns the second.
+
 ---
 
 ## Local vs. cloud split

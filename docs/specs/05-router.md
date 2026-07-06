@@ -89,6 +89,23 @@ async def model_call_masked(
 ) -> tuple[AsyncIterator[ModelChunk], asyncio.Task[ModelResponse]]:
     # Returns (haiku_ack_stream, opus_answer_task) — both already started
     ...
+
+# Supervised reasoning — opus runs cancellable while a haiku narrator describes its
+# live progress and a sonnet arbiter can stop/redirect it on an owner interjection.
+async def supervised_reason(
+    messages: list[dict],
+    on_narration: Callable[[str], Awaitable[None]],  # haiku's live "what opus is doing" → VoiceIO.speak()
+) -> "SupervisedSession": ...
+
+class SteeringDecision(Enum):
+    CONTINUE = "continue"     # ignore the interjection, opus keeps going
+    STOP = "stop"             # cancel opus, end the turn
+    REDIRECT = "redirect"     # cancel opus, relaunch with the correction + kept partial context
+
+class SupervisedSession:
+    result: asyncio.Task[ModelResponse]                            # the opus task (cancellable)
+    async def steer(self, utterance: str) -> SteeringDecision: ... # sonnet arbiter reads utterance + opus state
+    async def stop(self, keep_partial: bool = True) -> None: ...   # cancel opus; keep partial reasoning as context by default
 ```
 
 ---
@@ -188,6 +205,67 @@ This is **two calls, two billing events, two latency windows.** Brain decides wh
 │  (Slice 3)       │  from ack audio to answer audio.                   │
 └──────────────────┴────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Supervised reasoning (haiku narrator + sonnet arbiter)
+
+An extension of the two-call pattern for long opus reasoning the owner wants to **watch and
+steer** in real time (e.g. "why did the DAG fail?"). Three roles across three tiers:
+
+- **OPUS** — the deep reasoner. Runs as a **cancellable** `asyncio.Task` and streams its
+  intermediate reasoning.
+- **HAIKU (narrator)** — a second, cheap consumer of opus's stream. On reasoning-step
+  boundaries (**sampled, not per-token** — cost discipline) it emits one short spoken line
+  ("Opus is checking the pool config now…"), delivered via `on_narration` → `VoiceIO.speak()`.
+- **SONNET (arbiter)** — fires **only** when the owner interjects mid-flight. It reads the
+  utterance against opus's current state and returns a `SteeringDecision`.
+
+```
+you: "why did the DAG fail?"
+      │
+      ▼
+   Brain ──► Router.supervised_reason(messages, on_narration)
+      │
+  ┌───┴───────────────────┬───────────────────────────┐
+  ▼                       ▼                            ▼
+OPUS (cancellable)   HAIKU (narrator)           VoiceIO mic stays HOT
+streams reasoning ──►summarizes live ──► speak()      │
+  │                                                   │
+  │   you: "no — it's the retry limit, stop" ─────────┘
+  │                    │  session.steer(utterance)
+  │                    ▼
+  │              SONNET (arbiter)  →  CONTINUE | STOP | REDIRECT
+  │                    │
+  ◄──── opus_task.cancel() on STOP / REDIRECT ─────────
+                       │
+           REDIRECT → relaunch opus with the correction + kept partial context
+```
+
+### Steering vs. barge-in (important distinction)
+
+A `voice.utterance` that arrives **while a `SupervisedSession` is active** is a **steering
+signal**, not a fresh query. VoiceIO still cancels active TTS audio (barge-in, Slice 3 §Barge-in),
+*and* the utterance is routed to `session.steer()` → the sonnet arbiter, which is the **only**
+thing that can cancel the opus *task*. Barge-in alone only stops audio; it never stops the
+compute. Absent an active session, an utterance is a normal new query.
+
+### Decisions (locked defaults, tunable)
+
+- **Narrator cadence:** sampled on reasoning-step boundaries, not per-token. Continuous
+  per-token narration is a silent token-burner (see §Cost) → gated by Guard budget.
+- **On STOP:** keep opus's partial reasoning as context by default (so REDIRECT builds on it);
+  discard only on an explicit "start over" (`stop(keep_partial=False)`).
+- **Autonomy:** STOP / REDIRECT need **no** confirm gate — the owner correcting their own query
+  is inherently safe (contrast north-star §6.3, which gates shared-state writes).
+- **Arbiter = sonnet:** cheap enough to run on every interjection, capable enough to parse
+  intent + opus state. Haiku is too weak to arbitrate; opus too slow/costly to interrupt with.
+
+### Cost
+
+Worst case runs three tiers concurrently (opus + sampled haiku + occasional sonnet). Haiku
+narration is the recurring cost → sampled + budget-gated; under budget pressure Guard can
+downgrade narration to "silent" (log only). Sonnet fires only on an interjection.
 
 ---
 
@@ -385,9 +463,15 @@ pytest tests/router/test_latency_masking.py -v
   choke-point (current spec), or should Brain redact before passing messages to Router?
   Current decision: Router calls it, so it's unbypassable regardless of caller. Open for
   owner review if Brain needs pre-redaction for other reasons (e.g. memory writes).
-- **Haiku ack prompt ownership:** Is the `ack_prompt` authored per-skill by Brain, or does
-  Router have a default filler pool? Current assumption: Brain provides it. Decide in Slice 3
-  when VoiceIO is built and the ack experience can be tuned.
+- **Haiku ack prompt ownership:** Is the `ack_prompt` (for `model_call_masked`) authored
+  per-skill by Brain, or does Router have a default filler pool? Current assumption: Brain
+  provides it. Decide in Slice 3 when VoiceIO is built and the ack experience can be tuned.
+  Note: the `supervised_reason` **narrator** prompt is different — it is Router-owned and
+  standard ("in one short sentence, say what the reasoning model is currently doing"),
+  because it summarizes opus's live stream rather than producing generic filler.
+- **Narrator step-boundary detection:** How does the narrator decide a "reasoning step"
+  boundary to sample on (token count? punctuation/paragraph? opus thinking-block markers)?
+  Prototype during Slice 5 build; start with a simple N-token/again-on-pause heuristic.
 - **Model version pinning:** `BIFROST_MODEL_*` maps to named model strings. Should these be
   pinned to specific versions (e.g. `claude-haiku-4-5-20251001`) to avoid silent behavior
   changes on Bifrost updates? Decide at Slice 5 build time.

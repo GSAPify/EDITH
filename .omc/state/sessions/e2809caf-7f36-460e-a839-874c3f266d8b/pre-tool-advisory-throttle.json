@@ -2,45 +2,17 @@
   "version": 1,
   "entries": {
     "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
-      "last_emitted_at_ms": 1783262734769,
+      "last_emitted_at_ms": 1783332343842,
       "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
     },
     "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
-      "last_emitted_at_ms": 1783262651272,
+      "last_emitted_at_ms": 1783332301566,
       "message": "Verify changes work after editing. Test functionality before marking complete."
     },
-    "9d14735c80c11bd7fdd84224ff243a39c05c756817e81c09a96228e5685e88e2": {
-      "last_emitted_at_ms": 1783262264933,
-      "message": "Spawning agent: oh-my-claudecode:executor (sonnet) [BACKGROUND] | Task: Author Slice 6 spec: Desktop control"
-    },
-    "00afe28c79efde11f0012a30b3d7f99038a12a1597a5f752b111143ffd81d2a4": {
-      "last_emitted_at_ms": 1783262253663,
-      "message": "Spawning agent: oh-my-claudecode:executor (sonnet) [BACKGROUND] | Task: Author Slice 5 spec: Router"
-    },
-    "3a10eb6342db837ff086bf902b2ef423031868d75995e47f0c304094c5abe5ac": {
-      "last_emitted_at_ms": 1783262241675,
-      "message": "Spawning agent: oh-my-claudecode:executor (sonnet) [BACKGROUND] | Task: Author Slice 4 spec: Session awareness"
-    },
-    "a7be8a1d4224dd090985ef4d8af9d8e77507ef310c1bc0f985fab4910aef7438": {
-      "last_emitted_at_ms": 1783262227667,
-      "message": "Spawning agent: oh-my-claudecode:executor (sonnet) [BACKGROUND] | Task: Author Slice 3 spec: Voice"
-    },
-    "b5ba67b6f12ecdf21ae7e51960f66e4554bde9cdd208f5088b4a828fab621f4c": {
-      "last_emitted_at_ms": 1783262210335,
-      "message": "Spawning agent: oh-my-claudecode:executor (sonnet) [BACKGROUND] | Task: Author Slice 2 spec: PR-review skill"
-    },
-    "dfe78093c36fd6402fdb2748c1a572d40a23bc303db28857e86f4b2f65d77919": {
-      "last_emitted_at_ms": 1783262198675,
-      "message": "Spawning agent: oh-my-claudecode:executor (opus) [BACKGROUND] | Task: Author Slice 1 spec: Memory + Brain"
-    },
     "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
-      "last_emitted_at_ms": 1783262135884,
+      "last_emitted_at_ms": 1783332244629,
       "message": "Read multiple files in parallel when possible for faster analysis."
-    },
-    "3d2f113cf4feff2ab0182bef220650e3edead5137081d517595aa98276edf516": {
-      "last_emitted_at_ms": 1783261799286,
-      "message": "Spawning agent: oh-my-claudecode:executor (opus) | Task: Author EDITH north-star + protocol + template"
     }
   },
-  "updated_at": "2026-07-05T14:45:34.769Z"
+  "updated_at": "2026-07-06T10:05:43.842Z"
 }

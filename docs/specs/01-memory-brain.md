@@ -373,6 +373,13 @@ it **subscribes** to `voice.utterance`, `session.event`, `session.state`, `skill
   §4.3). Brain supplies a tier hint (compaction → haiku; a hard review → sonnet/opus) but the
   Router owns the final pick and, from Slice 5, the two-call latency-masking mechanics. Until then a
   single-tier passthrough is fine (north-star §7).
+- **Supervised reasoning (from Slice 5).** For long opus reasoning the owner wants to watch/steer,
+  Brain calls `Router.supervised_reason(messages, on_narration)` instead of `model_call`, wiring
+  `on_narration` to `VoiceIO.speak()` (haiku narrates opus's live progress). While a
+  `SupervisedSession` is active, Brain routes incoming `voice.utterance` events to
+  `session.steer()` (sonnet arbiter → CONTINUE|STOP|REDIRECT) rather than treating them as new
+  queries. STOP/REDIRECT is owner self-correction → no Guard confirm gate. See Slice 5 §Supervised
+  reasoning. (Passthrough Brain before Slice 5 just uses `model_call`.)
 
 ## edithd daemon lifecycle
 
