@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "EDITH — always-on local-first macOS assistant. Slice 1: Memory store."
 requires-python = ">=3.11"
 dependencies = [
+    "fastembed>=0.8.0",
     "kuzu>=0.11",
 ]
 

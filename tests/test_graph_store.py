@@ -29,7 +29,7 @@ def test_remember_and_recall_a_fact_by_project(tmp_path):
     )
 
     hits = store.recall("onboarding-portal")
-    texts = [h["text"] for h in hits if h["label"] == "Fact"]
+    texts = [str(h["text"]) for h in hits if h["label"] == "Fact"]
     assert any("service account not shared" in t for t in texts)
 
 
@@ -48,7 +48,7 @@ def test_recall_survives_reopen(tmp_path):
     # Fresh process-like reopen of the same on-disk DB (the recall-across-restart promise).
     reopened = MemoryStore(db_path)
     hits = reopened.recall("edith")
-    assert any("uses kuzu" in h["text"] for h in hits if h["label"] == "Fact")
+    assert any("uses kuzu" in str(h["text"]) for h in hits if h["label"] == "Fact")
 
 
 def test_remember_is_idempotent_on_node_id(tmp_path):
