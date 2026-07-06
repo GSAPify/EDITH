@@ -34,10 +34,17 @@ class VectorMemoryStore(MemoryStore):
     ) -> None:
         super().__init__(db_path)
         self._embedder: Embedder = embedder or LocalEmbedder()
-        self._index_built = False
         self._run("INSTALL vector")
         self._run("LOAD vector")
         self._ensure_embedding_column()
+
+    def _index_exists(self) -> bool:
+        # Ask the DB, not an in-memory flag: the index persists on disk across
+        # reopens, so a fresh instance must see an index built in a prior session.
+        return any(
+            row[1] == _FACT_INDEX
+            for row in self._rows("CALL SHOW_INDEXES() RETURN *")
+        )
 
     def _ensure_embedding_column(self) -> None:
         # Add a fixed-width float embedding column to Fact if not already there.
@@ -67,14 +74,22 @@ class VectorMemoryStore(MemoryStore):
                 prepared.append(clean)
         super().remember(nodes=prepared, edges=edges)
 
-    def rebuild_vector_index(self) -> None:
-        """(Re)build the static HNSW index over Fact.embedding."""
-        if self._index_built:
-            self._run(f"CALL DROP_VECTOR_INDEX('Fact', '{_FACT_INDEX}')")
-        self._run(
-            f"CALL CREATE_VECTOR_INDEX('Fact', '{_FACT_INDEX}', 'embedding', metric := 'cosine')"
-        )
-        self._index_built = True
+    def build_vector_index(self) -> None:
+        """Build the static HNSW index over Fact.embedding, once.
+
+        KNOWN LIMITATION (Kuzu 0.11.3, verified at build time): an index cannot
+        be dropped and recreated under the same name — even within one session
+        the catalog keeps the stale entry and CREATE errors "already exists". So
+        this is a *build-once* operation, not a rebuild. New Facts added after a
+        build are found by the inherited graph ``recall`` (the spec's
+        design-around) until the store is rebuilt from scratch. Incremental
+        re-indexing is the documented trigger for the sqlite-vec fallback.
+        """
+        if not self._index_exists():
+            self._run(
+                f"CALL CREATE_VECTOR_INDEX('Fact', '{_FACT_INDEX}', 'embedding', "
+                "metric := 'cosine')"
+            )
 
     def semantic_recall(self, query: str, k: int = 5) -> list[dict[str, object]]:
         """Top-k Facts by cosine similarity to ``query``.
@@ -82,7 +97,7 @@ class VectorMemoryStore(MemoryStore):
         Returns ``[]`` if no index has been built yet — callers rely on the
         inherited graph ``recall`` to cover that window (static-index caveat).
         """
-        if not self._index_built:
+        if not self._index_exists():
             return []
         query_vec = self._embedder.embed(query)
         rows = self._rows(

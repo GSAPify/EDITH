@@ -34,7 +34,7 @@ def test_semantic_recall_finds_related_fact(tmp_path, embedder: Embedder):
         ]
     )
     # Static HNSW: build the index once the rows exist.
-    store.rebuild_vector_index()
+    store.build_vector_index()
 
     hits = store.semantic_recall("why did the service account cause an error?", k=2)
     ids = [h["id"] for h in hits]
@@ -50,3 +50,19 @@ def test_semantic_recall_empty_before_index_build(tmp_path, embedder: Embedder):
     # structural graph recall still finds it — the design-around for static HNSW.
     assert store.semantic_recall("fact", k=5) == []
     assert any(h["id"] == "f1" for h in store.recall("fact"))
+
+
+def test_semantic_recall_after_reopen(tmp_path, embedder: Embedder):
+    # The persisted HNSW index is directly queryable after a fresh reopen with
+    # NO rebuild (verified against Kuzu 0.11.3). This is the semantic half of the
+    # recall-across-restart promise: a daemon that goes down and comes back keeps
+    # its vector recall without re-indexing.
+    db_path = tmp_path / "mem.kuzu"
+    store = VectorMemoryStore(db_path, embedder=embedder)
+    store.remember(nodes=[Node("Fact", "f1", {"text": "the CI runner ran out of disk"})])
+    store.build_vector_index()
+    store.close()
+
+    reopened = VectorMemoryStore(db_path, embedder=embedder)
+    ids = [h["id"] for h in reopened.semantic_recall("disk space on the CI machine", k=1)]
+    assert ids == ["f1"]
