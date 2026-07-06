@@ -17,11 +17,17 @@ tables and a token-counted working-context buffer that don't exist yet
 (tracked in the Completion Record). Memory is called synchronously; it is a
 blocking Kuzu store and there is no real concurrency in this slice. When that
 changes, wrap the two Memory calls in ``asyncio.to_thread``.
+
+PAUSE (spec 01 §"Pause + Memory"): Brain reads a zero-arg ``is_paused``
+predicate wired from the daemon's RuntimeState. While paused it skips the whole
+pass — no model_call AND no remember — the privacy-respecting reading of a
+manual pause. Default is not-paused so Brain works standalone.
 """
 
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Protocol
 
 from edith.bus import Event, EventBus
@@ -63,13 +69,30 @@ class RouterLike(Protocol):
 class Brain:
     """The orchestrator loop; subscribes itself to ``voice.utterance``."""
 
-    def __init__(self, bus: EventBus, memory: MemoryLike, router: RouterLike) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        memory: MemoryLike,
+        router: RouterLike,
+        is_paused: Callable[[], bool] = lambda: False,
+    ) -> None:
         self._bus = bus
         self._memory = memory
         self._router = router
+        # Zero-arg predicate wired from the daemon's RuntimeState. Default
+        # not-paused so Brain used standalone (and the existing tests) behave
+        # exactly as before.
+        self._is_paused = is_paused
         bus.subscribe("voice.utterance", self._on_utterance)
 
     async def _on_utterance(self, event: Event) -> None:
+        # Pause semantics (spec 01 §"Pause + Memory"): while paused, skip the
+        # model call AND the remember — the privacy-respecting reading of a
+        # manual pause ("don't capture this moment"). The in-RAM conversation
+        # buffer is retained simply by dropping nothing here.
+        if self._is_paused():
+            return
+
         utterance = str(event.payload.get("text", ""))
 
         # 1. RECALL
