@@ -1,31 +1,49 @@
-"""Semantic recall over Kuzu's native HNSW vector index.
+"""Semantic recall over a sqlite-vec vector store.
 
-``VectorMemoryStore`` extends the graph ``MemoryStore`` with an embedding
-column on the embeddable node types (Fact for this slice), the local embedder,
-and the Kuzu VECTOR extension:
+``VectorMemoryStore`` extends the graph ``MemoryStore`` with an *embedded*
+sqlite-vec index for the embeddable node types (Fact for this slice). The
+vectors live in a sqlite file alongside the Kuzu DB — Kuzu owns the graph,
+sqlite-vec owns the vectors (spec §Storage decision, revised Session 2):
 
-- ``remember`` embeds each Fact's text and stores it as ``FLOAT[384]``.
-- ``rebuild_vector_index`` (re)builds the static HNSW index over those rows.
-- ``semantic_recall`` runs ``QUERY_VECTOR_INDEX`` for top-k similar Facts.
+- ``remember`` writes each Fact to the graph AND its embedding to sqlite-vec,
+  in the same write path — a Fact's graph node and its vector row are written
+  together or the whole ``remember`` raises.
+- ``semantic_recall`` runs a sqlite-vec KNN query for top-k similar Facts.
+- ``build_vector_index`` is retained as a no-op: sqlite-vec inserts are
+  incremental, so there is no build-once step. A Fact remembered after the
+  store already exists is immediately searchable — the capability Kuzu's
+  build-once HNSW index lacked.
 
-The index is *static* (Kuzu exposes build + query, no incremental update), so
-it is built after rows exist and rebuilt on demand. Between rebuilds, the
-graph-only ``recall`` (inherited) keeps freshly-written facts findable — the
-spec's design-around, not a bolt-on.
+**id-mapping.** sqlite-vec rows are keyed by integer ``rowid``; Kuzu Fact nodes
+are keyed by string ``id``. A companion ``fact_map(rowid ↔ fact_id)`` table,
+written in the same ``remember`` as the vector row, ties them together.
+
+**Atomicity is honest, not cross-engine.** There is no two-phase commit across
+two embedded engines. The graph write (Kuzu) happens first; the sqlite side is
+wrapped in a single transaction. If the sqlite write fails the whole
+``remember`` raises (so the caller sees the failure), rather than silently
+leaving the vector store behind the graph.
 """
 
 from __future__ import annotations
 
+import sqlite3
+import struct
 from pathlib import Path
+
+import sqlite_vec
 
 from edith.memory.embeddings import Embedder, LocalEmbedder
 from edith.memory.store import Edge, MemoryStore, Node, sanitize_node
 
-_FACT_INDEX = "fact_embedding_idx"
+
+def _pack(vector: list[float]) -> bytes:
+    """Pack a float vector into sqlite-vec's little-endian float32 blob format."""
+    return struct.pack(f"{len(vector)}f", *vector)
 
 
 class VectorMemoryStore(MemoryStore):
-    """Graph store + native Kuzu HNSW vector index for semantic recall."""
+    """Graph store (Kuzu) + embedded sqlite-vec index for semantic recall."""
 
     def __init__(
         self,
@@ -34,78 +52,109 @@ class VectorMemoryStore(MemoryStore):
     ) -> None:
         super().__init__(db_path)
         self._embedder: Embedder = embedder or LocalEmbedder()
-        self._run("INSTALL vector")
-        self._run("LOAD vector")
-        self._ensure_embedding_column()
+        self._vec_path = self._sibling_vec_path(Path(db_path))
+        self._vec = self._open_vec_store()
+        self._create_vec_schema()
 
-    def _index_exists(self) -> bool:
-        # Ask the DB, not an in-memory flag: the index persists on disk across
-        # reopens, so a fresh instance must see an index built in a prior session.
-        return any(
-            row[1] == _FACT_INDEX
-            for row in self._rows("CALL SHOW_INDEXES() RETURN *")
-        )
+    @staticmethod
+    def _sibling_vec_path(db_path: Path) -> str:
+        # Kuzu stores its DB as a file (or a directory on some versions); put the
+        # sqlite-vec file deterministically alongside it so a reopen re-finds it.
+        return str(db_path.parent / f"{db_path.name}.vec.sqlite")
 
-    def _ensure_embedding_column(self) -> None:
-        # Add a fixed-width float embedding column to Fact if not already there.
+    def _open_vec_store(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._vec_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        return conn
+
+    def _create_vec_schema(self) -> None:
         dim = self._embedder.dim
-        existing = {row[1] for row in self._rows("CALL TABLE_INFO('Fact') RETURN *;")}
-        if "embedding" not in existing:
-            self._run(f"ALTER TABLE Fact ADD embedding FLOAT[{dim}]")
+        self._vec.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS fact_vectors USING vec0(embedding FLOAT[{dim}])"
+        )
+        # Companion id-map: sqlite rowid <-> Kuzu Fact string id. Unique on
+        # fact_id so re-remembering the same Fact upserts one vector row.
+        self._vec.execute(
+            "CREATE TABLE IF NOT EXISTS fact_map("
+            "rowid INTEGER PRIMARY KEY, fact_id TEXT UNIQUE NOT NULL, text TEXT NOT NULL)"
+        )
+        self._vec.commit()
 
     def remember(
         self,
         nodes: list[Node] | None = None,
         edges: list[Edge] | None = None,
     ) -> None:
-        """Write nodes/edges, embedding each Fact's *sanitized* text into its row.
+        """Write nodes/edges to the graph, and each Fact's embedding to sqlite-vec.
 
-        Secrets are stripped FIRST (before embedding) so a credential never
-        reaches the vector store either.
+        Secrets are stripped FIRST (before embedding), so a credential never
+        reaches the vector store either. The graph write and the vector write
+        share one ``remember`` boundary: the sqlite writes run in a single
+        transaction and any failure raises rather than desyncing the stores.
         """
-        prepared: list[Node] = []
-        for node in nodes or []:
-            clean = sanitize_node(node)
-            if clean.label == "Fact" and "embedding" not in clean.props:
-                text = str(clean.props.get("text", ""))
-                vec = self._embedder.embed(text)
-                prepared.append(Node(clean.label, clean.id, {**clean.props, "embedding": vec}))
-            else:
-                prepared.append(clean)
-        super().remember(nodes=prepared, edges=edges)
+        clean_nodes = [sanitize_node(n) for n in (nodes or [])]
+        super().remember(nodes=clean_nodes, edges=edges)
+
+        facts = [n for n in clean_nodes if n.label == "Fact"]
+        if not facts:
+            return
+        try:
+            for fact in facts:
+                text = str(fact.props.get("text", ""))
+                self._upsert_vector(fact.id, text)
+            self._vec.commit()
+        except sqlite3.Error:
+            self._vec.rollback()
+            raise
+
+    def _upsert_vector(self, fact_id: str, text: str) -> None:
+        # Re-remembering a Fact replaces its vector row; keep the id-map unique.
+        row = self._vec.execute(
+            "SELECT rowid FROM fact_map WHERE fact_id = ?", (fact_id,)
+        ).fetchone()
+        vec = _pack(self._embedder.embed(text))
+        if row is not None:
+            rowid = int(row[0])
+            self._vec.execute("DELETE FROM fact_vectors WHERE rowid = ?", (rowid,))
+            self._vec.execute(
+                "INSERT INTO fact_vectors(rowid, embedding) VALUES (?, ?)", (rowid, vec)
+            )
+            self._vec.execute(
+                "UPDATE fact_map SET text = ? WHERE rowid = ?", (text, rowid)
+            )
+            return
+        cursor = self._vec.execute(
+            "INSERT INTO fact_map(fact_id, text) VALUES (?, ?)", (fact_id, text)
+        )
+        rowid = int(cursor.lastrowid or 0)
+        self._vec.execute(
+            "INSERT INTO fact_vectors(rowid, embedding) VALUES (?, ?)", (rowid, vec)
+        )
 
     def build_vector_index(self) -> None:
-        """Build the static HNSW index over Fact.embedding, once.
+        """No-op: sqlite-vec inserts are incremental (no build-once step).
 
-        KNOWN LIMITATION (Kuzu 0.11.3, verified at build time): an index cannot
-        be dropped and recreated under the same name — even within one session
-        the catalog keeps the stale entry and CREATE errors "already exists". So
-        this is a *build-once* operation, not a rebuild. New Facts added after a
-        build are found by the inherited graph ``recall`` (the spec's
-        design-around) until the store is rebuilt from scratch. Incremental
-        re-indexing is the documented trigger for the sqlite-vec fallback.
+        Retained so callers written against the previous build-once Kuzu impl
+        keep working; the moment a Fact is remembered it is searchable.
         """
-        if not self._index_exists():
-            self._run(
-                f"CALL CREATE_VECTOR_INDEX('Fact', '{_FACT_INDEX}', 'embedding', "
-                "metric := 'cosine')"
-            )
 
     def semantic_recall(self, query: str, k: int = 5) -> list[dict[str, object]]:
-        """Top-k Facts by cosine similarity to ``query``.
-
-        Returns ``[]`` if no index has been built yet — callers rely on the
-        inherited graph ``recall`` to cover that window (static-index caveat).
-        """
-        if not self._index_exists():
-            return []
-        query_vec = self._embedder.embed(query)
-        rows = self._rows(
-            f"CALL QUERY_VECTOR_INDEX('Fact', '{_FACT_INDEX}', $q, $k) "
-            "RETURN node.id, node.text, distance ORDER BY distance",
-            {"q": query_vec, "k": k},
-        )
+        """Top-k Facts by cosine-ish (L2) distance to ``query``, via sqlite-vec KNN."""
+        query_vec = _pack(self._embedder.embed(query))
+        rows = self._vec.execute(
+            "SELECT v.rowid, m.fact_id, m.text, v.distance "
+            "FROM fact_vectors v JOIN fact_map m ON m.rowid = v.rowid "
+            "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+            (query_vec, k),
+        ).fetchall()
         return [
-            {"label": "Fact", "id": str(fid), "text": text, "distance": float(dist)}
-            for fid, text, dist in rows
+            {"label": "Fact", "id": str(fact_id), "text": text, "distance": float(dist)}
+            for _rowid, fact_id, text, dist in rows
         ]
+
+    def close(self) -> None:
+        """Close the sqlite-vec connection, then the Kuzu graph store."""
+        self._vec.close()
+        super().close()
