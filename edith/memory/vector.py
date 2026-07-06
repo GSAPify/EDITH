@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from edith.memory.embeddings import Embedder, LocalEmbedder
-from edith.memory.store import Edge, MemoryStore, Node
+from edith.memory.store import Edge, MemoryStore, Node, sanitize_node
 
 _FACT_INDEX = "fact_embedding_idx"
 
@@ -51,15 +51,20 @@ class VectorMemoryStore(MemoryStore):
         nodes: list[Node] | None = None,
         edges: list[Edge] | None = None,
     ) -> None:
-        """Write nodes/edges, embedding each Fact's text into its row."""
+        """Write nodes/edges, embedding each Fact's *sanitized* text into its row.
+
+        Secrets are stripped FIRST (before embedding) so a credential never
+        reaches the vector store either.
+        """
         prepared: list[Node] = []
         for node in nodes or []:
-            if node.label == "Fact" and "embedding" not in node.props:
-                text = str(node.props.get("text", ""))
+            clean = sanitize_node(node)
+            if clean.label == "Fact" and "embedding" not in clean.props:
+                text = str(clean.props.get("text", ""))
                 vec = self._embedder.embed(text)
-                prepared.append(Node(node.label, node.id, {**node.props, "embedding": vec}))
+                prepared.append(Node(clean.label, clean.id, {**clean.props, "embedding": vec}))
             else:
-                prepared.append(node)
+                prepared.append(clean)
         super().remember(nodes=prepared, edges=edges)
 
     def rebuild_vector_index(self) -> None:

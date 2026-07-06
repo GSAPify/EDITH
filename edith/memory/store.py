@@ -18,6 +18,8 @@ from typing import Any
 
 import kuzu
 
+from edith.memory.secrets import sanitize_text
+
 # The core slice-1 subset of the spec's data model (Data model §Node/Edge types).
 # Deliberately not all 10 nodes / 11 edges — enough to prove the pattern.
 _NODE_SCHEMA: dict[str, str] = {
@@ -82,6 +84,18 @@ class Edge:
     to_id: str
 
 
+def sanitize_node(node: Node) -> Node:
+    """Return ``node`` with every string property run through the secrets filter.
+
+    The never-persist step (north-star §6.1): a credential in any text property
+    is redacted before the node is written anywhere.
+    """
+    cleaned = {
+        k: (sanitize_text(v) if isinstance(v, str) else v) for k, v in node.props.items()
+    }
+    return Node(node.label, node.id, cleaned)
+
+
 class MemoryStore:
     """Embedded-Kuzu graph store. One instance owns one DB directory."""
 
@@ -128,9 +142,14 @@ class MemoryStore:
         nodes: list[Node] | None = None,
         edges: list[Edge] | None = None,
     ) -> None:
-        """Write nodes (upsert by id) then edges. Nodes must exist before edges."""
+        """Write nodes (upsert by id) then edges. Nodes must exist before edges.
+
+        The never-persist secrets filter runs FIRST (north-star §6.1): every
+        string property is sanitized before any write, so a credential is never
+        persisted to the graph.
+        """
         for node in nodes or []:
-            self._upsert_node(node)
+            self._upsert_node(sanitize_node(node))
         for edge in edges or []:
             self._create_edge(edge)
 

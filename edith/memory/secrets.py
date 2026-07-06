@@ -1,0 +1,47 @@
+"""Never-persist secrets filter (north-star §6.1, spec §Autonomy & secrets).
+
+EDITH ingests the owner's CLAUDE.md, which holds LIVE credentials. This filter
+runs FIRST in ``remember`` so a credential is stripped before anything reaches
+the graph, the vector store, logs, or the bus. It stores the *fact of it*,
+never the secret itself — matching the spec's example.
+
+Deliberately conservative: matches labelled secret assignments (``key = value``,
+``secret: value``), long token-shaped runs, and PEM headers. False positives
+(over-redaction) are the safe failure here; a leaked credential is not.
+"""
+
+from __future__ import annotations
+
+import re
+
+_REDACTED = "[REDACTED]"
+
+# key/secret/token/password assignments: `name: value` or `name = value`.
+_ASSIGNMENT = re.compile(
+    r"(?i)\b([\w.-]*(?:secret|token|password|passwd|api[_-]?key|client[_-]?secret|"
+    r"private[_-]?key|access[_-]?key|refresh[_-]?token))\b\s*[:=]\s*(\S+)"
+)
+
+# PEM / private-key block headers.
+_PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+
+# Provider-shaped token prefixes (Google OAuth, OpenAI-style, GitHub PATs).
+_TOKEN_PREFIX = re.compile(r"\b(?:GOCSPX-|sk-[A-Za-z0-9-]+|ghp_|github_pat_)\S+")
+
+
+def contains_secret(text: str) -> bool:
+    """True if ``text`` carries secret-shaped material."""
+    return bool(
+        _ASSIGNMENT.search(text) or _PEM.search(text) or _TOKEN_PREFIX.search(text)
+    )
+
+
+def sanitize_text(text: str) -> str:
+    """Return ``text`` with any secret value replaced by ``[REDACTED]``.
+
+    The surrounding non-secret prose is preserved so the *fact* survives.
+    """
+    out = _ASSIGNMENT.sub(lambda m: f"{m.group(1)}: {_REDACTED}", text)
+    out = _PEM.sub(_REDACTED, out)
+    out = _TOKEN_PREFIX.sub(_REDACTED, out)
+    return out
