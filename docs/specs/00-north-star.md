@@ -282,8 +282,11 @@ build ►  1 Memory+Brain ─► 2 PR-review ─► 3 Voice ─► 4 Session-awa
 
 ## 9. Open Questions (surfaced for owner)
 
-1. **Vector index pick** — is Kuzu's native vector index mature enough for semantic recall, or
-   do we pair Kuzu with LanceDB / sqlite-vec? Decided in Slice 1.
+1. **Vector index pick** — ~~is Kuzu's native vector index mature enough, or pair with
+   LanceDB / sqlite-vec?~~ **RESOLVED (Slice 1 build, Session 2): Kuzu (graph) + `sqlite-vec`
+   (vectors).** Kuzu 0.11.3 (latest) HNSW is build-once — no incremental inserts — which breaks
+   continuous learning. sqlite-vec supports incremental inserts and `sqlite3` is already present.
+   See `01-memory-brain.md` §Storage decision.
 2. **Terminal driver** — with iTerm absent, do we drive Terminal.app via `osascript`, or spawn
    and manage our own shell for OMC launches? Decided in Slice 6 (prototype in Slice 4).
 3. **Graph server escalation** — does any slice actually justify Neo4j-over-Kuzu, or does

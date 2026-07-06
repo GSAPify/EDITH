@@ -239,40 +239,35 @@ Event, PR** (title/body). Structural-only nodes (Owner, Repo, Person) are reache
 
 ### Storage decision — RESOLVES north-star Open Question #1
 
-**Decision: Kuzu native HNSW vector index (primary). sqlite-vec as the documented fallback.**
+**Decision (revised on build evidence, Session 2): Kuzu (graph) + `sqlite-vec` (vectors).**
 
-Verified against current Kuzu docs (context7 `/kuzudb/docs`, this session): Kuzu ships a
-**VECTOR extension** providing a native **disk-based HNSW** index —
-`CALL CREATE_VECTOR_INDEX(...)` / `CALL QUERY_VECTOR_INDEX(table, index, query_vec, k)` — over
-`FLOAT[]`/`DOUBLE[]` node properties, with cosine/L2 metrics and standard HNSW knobs (`efc`,
-`efs`, `mu`, `ml`). It exists and is buildable today (no unicorn).
+The Session-1 spec chose Kuzu native HNSW as primary with sqlite-vec as a documented fallback,
+and explicitly flagged a maturity caveat to re-verify at build time. **Build verified the caveat
+bites**, so the fallback becomes the decision:
 
-**Why Kuzu-native wins for v1:**
-- **One engine, not two.** Graph traversal and vector search live in the same DB, same
-  transaction, same file. `recall` can fuse "traverse the subgraph" and "top-k similar Facts" in
-  Cypher without a cross-store join or a second connection to keep consistent. This directly
-  matches the owner's "don't over-engineer / reach for what I already know first" rules and the
-  north-star "no server" default.
-- Embeddings sit as a property on the very nodes we traverse, so a semantic hit *is* already a
-  graph node — no id-mapping layer between a vector store and the graph.
+**Evidence (Session 2 build).** On **Kuzu 0.11.3 — the latest release** (confirmed newest on PyPI,
+not a stale pin), the HNSW vector index is **build-once**: it cannot be dropped/recreated, and this
+fails **even within a single session**. There is no incremental in-place update API. So new
+`Fact`/`Event` vectors written by `remember()` could not become semantically searchable without a
+full rebuild — which the drop-broken limitation makes awkward (recreate the table / a fresh DB and
+repopulate). This is fatal for a memory that learns continuously: the core UX is telling EDITH
+something and referencing it moments later, which requires **incremental** semantic recall.
 
-**The honest maturity caveat (the reason a fallback is named).** As of the pinned Kuzu version,
-the retrieved docs expose only `CREATE_VECTOR_INDEX` / `QUERY_VECTOR_INDEX` and **no incremental
-in-place update API** — strongly implying the HNSW index is **static** (built over the rows present
-at build time; new vectors become searchable only after a **rebuild**). This is a version-dependent
-assumption to **re-verify at build time**, not an eternal fact — but it is the conservative reading,
-and our design degrades gracefully if it turns out looser. New Facts/Events written by `remember`
-are queryable structurally (Cypher) immediately; they become vector-searchable after the next
-rebuild. We accept and design around this (see Retrieval + compaction below) rather than pretend it
-away.
+**Why `sqlite-vec` for the vector layer:**
+- **Incremental inserts, no rebuild** — a Fact written by `remember()` is semantically searchable
+  immediately. This is the whole "never re-explain context" promise.
+- **`sqlite3` is already on the machine** (north-star §8 reality-check); lightest possible embedded
+  vector option; no server (keeps the north-star "no server" default).
+- Chosen over LanceDB for exactly that already-present-and-lightest reason.
 
-**Fallback (documented, not default): Kuzu (graph) + `sqlite-vec` (vectors).** Chosen over LanceDB
-because **`sqlite3` is already present on the machine** (north-star §8 reality-check), it is the
-lightest possible embedded vector option, and it supports incremental inserts (no rebuild step) —
-which would directly resolve the maturity caveat if it bites. The cost is a second store and an
-id-mapping layer (vector row ↔ graph node id). We adopt this fallback only if the rebuild approach
-proves too costly in practice (measure first — owner's rule). **We do not adopt Neo4j** for this
-slice; north-star Open Question #3 (server escalation) stays "embedded holds for v1."
+**Kuzu still owns the graph** (project→repo→PR→person traversal — its strength). The cost we accept
+is **two embedded stores + an id-mapping layer** (sqlite-vec rowid ↔ Kuzu node id), kept in sync
+inside a single `remember()` transaction boundary. **We do not adopt Neo4j** for this slice;
+north-star Open Question #3 (server escalation) stays "embedded holds for v1."
+
+> Build note: the Session-2 Memory store shipped against Kuzu's native index (build-once) to prove
+> the graph+vector `recall` path end-to-end. The vector layer (`edith/memory/vector.py`) is being
+> swapped to sqlite-vec test-first; graph code (`store.py`) is unaffected.
 
 **Encryption at rest — stated honestly.** Kuzu does **not** provide native at-rest encryption, and
 neither does sqlite-vec by default. Do **not** write "the DB encrypts the store" — that is the
