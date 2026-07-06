@@ -112,6 +112,19 @@ class SupervisedSession:
 
 ## Tier selection
 
+### Routing philosophy — latency-first (revised Session 3)
+
+EDITH's *talking voice* is **Sonnet**, not Opus. Rationale: Opus is slow, and the owner usually
+already has an Opus session running in a terminal — a second in-line Opus just adds latency
+without adding value. Latency is the product constraint.
+
+- **Haiku** — instant: acks, wake-word confirm, narration, trivial lookups.
+- **Sonnet** — the **DEFAULT** for every conversational turn. EDITH's voice.
+- **Opus** — **background / explicitly-invoked deep work only** ("think about X", pasted logs,
+  screen reading, brainstorm). NEVER blocks the conversation. See §Background reasoning.
+
+When in doubt, stay on Sonnet and push depth to the background.
+
 ### Heuristics
 
 Brain passes a `tier_hint`. Router applies the following decision: if the hint matches a tier,
@@ -128,8 +141,10 @@ it is used as-is unless the Router's own override rules fire (listed below the t
 ├─────────────────────────────┼────────────────────────────────────────────┤
 │  Router override: escalate   │                                            │
 │  HAIKU → SONNET if…          │  message token count > HAIKU_MAX_TOKENS    │
-│  SONNET → OPUS if…           │  task_type in {code_review, plan, debate}  │
-│                              │  OR message token count > SONNET_MAX_TOKENS│
+│  SONNET stays SONNET for the │  the LIVE turn is NEVER blocked on opus.   │
+│  live turn; deep signal →    │  deep signal (code_review/plan/debate/long │
+│  BACKGROUND opus job          │  ctx) → Brain fires async opus (see        │
+│  (§Background reasoning)      │  §Background reasoning); Sonnet holds turn │
 ├─────────────────────────────┼────────────────────────────────────────────┤
 │  Router override: demote     │                                            │
 │  any → HAIKU if…             │  task_type == ack_filler                   │
@@ -146,13 +161,59 @@ annotates the response with `budget_limited=True`. See north-star §6.2.
 messages token count ≤ 500   AND task_type in {lookup, ack, filler}
   → HAIKU
 
-messages token count ≤ 4000  OR  task_type in {standard, skill, recall}
-  → SONNET
+any normal conversational turn (the DEFAULT)
+  → SONNET   (EDITH's talking voice — latency-first)
 
-task_type in {code_review, plan, debate, deep_analysis}
-  OR messages token count > 4000
-  → OPUS  (subject to budget gate)
+task_type in {code_review, plan, debate, deep_analysis} OR token count > 4000
+  OR a Sonnet-detected "hard" question
+  → OPUS, but as a BACKGROUND job (async, non-blocking — §Background reasoning).
+    The live turn still answers with SONNET ("let me think on that…").
+    (subject to budget gate)
 ```
+
+---
+
+## Background reasoning (fire-and-notify opus)
+
+The **background** counterpart to §Supervised reasoning (which is foreground + steerable). Used
+when the owner kicks off deep work ("Hey EDITH, think about our sharding strategy"), pastes
+logs/code, triggers screen reading, or asks a question Sonnet judges too hard for a live answer
+(**auto-escalation** — the owner-chosen default, Session 3).
+
+```
+you: "think about X"   (or paste / screen-read / a detected-hard question)
+      │
+      ▼
+  Brain.think_async(messages) ──► returns a job handle IMMEDIATELY (non-blocking)
+      │
+      ├─► SONNET (voice, instant): "Started a thinking session on X — I'll ping you."
+      │                                        ← you keep talking / working
+      │
+      └─► OPUS runs in the background ──► done
+                                          │
+              Brain notifies: SONNET summarizes the result by voice;
+              full detail persisted to Memory (remember()).
+```
+
+### Contract (interface-level)
+```python
+async def think_async(
+    messages: list[dict],
+    on_done: Callable[[ModelResponse], Awaitable[None]],  # Brain wires → Sonnet summary + Memory.remember
+) -> BackgroundJob: ...   # returns immediately; exposes job.id, job.status, job.cancel()
+```
+
+### Auto-escalation (hard-question detection)
+A normal turn runs on Sonnet. If a cheap complexity signal marks the question "hard" (Sonnet
+self-assessment or a lightweight classifier — prototype the signal at Slice 5 build), Brain does
+**not** block the turn on opus; it answers with a Sonnet holding response ("let me think on that
+properly") and fires `think_async`, then reports back. Distinct from `supervised_reason`, which is
+foreground and interruptible.
+
+### Cost / autonomy
+Background opus is the expensive tier → **budget-gated** (north-star §6.2) before the job starts.
+Kicking off a thinking session is a read/think action → **AUTO** (no confirm gate); it writes only
+to Memory, never to shared state.
 
 ---
 
