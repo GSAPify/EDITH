@@ -642,3 +642,46 @@ semantic recall (reopen the on-disk DB, recall the stored fact).
 - Recall fusion is graph-only + separate `semantic_recall`; the weighted
   traversal+vector+recency *scoring blend* is not yet implemented (each signal works
   independently).
+
+---
+
+## Completion Record — Vector layer swap (Kuzu HNSW → sqlite-vec) — 2026-07-06 — **DONE**
+
+> Status: **DONE.** The vector layer (`edith/memory/vector.py`) is swapped from Kuzu's
+> build-once HNSW index to embedded `sqlite-vec`, strict-TDD. This implements §Storage
+> decision (revised): **Kuzu keeps the graph, sqlite-vec owns the vectors.** Resolves the
+> Session-2 "vector re-index decision" blocker with the incremental-insert store.
+
+**What shipped:** `VectorMemoryStore` now backs semantic recall with sqlite-vec (one sqlite
+file per store, sibling to the Kuzu DB) instead of Kuzu's HNSW index. Same public interface
+(`__init__(db_path, embedder=)`, `remember`, `semantic_recall`, `build_vector_index`,
+`close`) — `store.py`/`embeddings.py`/`secrets.py` unchanged. Vectors leave Kuzu entirely
+(no more `embedding FLOAT[384]` column on Fact). `build_vector_index()` is retained as a
+no-op because sqlite-vec inserts are incremental — no build-once step.
+
+**The capability Kuzu lacked, now proven (test-first):**
+`test_fact_remembered_after_index_exists_is_recalled_immediately` — remember f1 → build →
+remember f2 (new fact, *after* the index exists) → `semantic_recall` returns f2. Watched it
+fail RED on the build-once Kuzu impl (`RuntimeError: Cannot set property vec in table
+embeddings because it is used in one or more indexes`), then green on sqlite-vec. This is the
+"never re-explain context" promise: a fact told moments ago is immediately semantically
+recallable, no rebuild.
+
+**id-mapping (sqlite-vec rowid ↔ Kuzu Fact id):** a companion `fact_map(rowid PK, fact_id
+UNIQUE, text)` sqlite table ties each `vec0` rowid to the Kuzu Fact's string id; it is written
+in the same `remember()` call as the vector row and the graph node. Kuzu remains source of
+truth for the graph; the id-map (+ denormalized text for the recall return shape) lives in
+sqlite. **No cross-engine 2PC** (two embedded engines cannot 2-phase-commit): the graph write
+lands first, the sqlite writes run in one transaction, and any `sqlite3.Error` rolls back the
+sqlite side and re-raises so the caller sees the desync rather than it being swallowed.
+
+**Deviations:** one existing test was rewritten (not code-worked-around):
+`test_semantic_recall_empty_before_index_build` asserted `semantic_recall == []` before a
+build — that `== []` *was* the build-once limitation being removed. It is now
+`test_semantic_recall_works_without_build_step` (recall works with no build step), flagged in
+the test as a deliberate deviation. Net: 11 unchanged + 1 rewritten + 1 new = 13 green.
+
+**Verification (fresh):** `uv run pytest` → 13 passed · `uv run ruff check edith tests` →
+All checks passed · `uv run pyright edith` → 0 errors, 0 warnings. sqlite-vec extension
+loading + KNN round-trip smoke-tested on-machine before building (macOS stdlib `sqlite3`
+allows extension loading here — no blocker).

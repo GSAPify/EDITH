@@ -185,3 +185,56 @@ step 3 was unblocked. Committed after each green step (data-loss insurance).
 Continue Slice 1: Brain loop skeleton (bus + recall→decide→remember, Router passthrough),
 then edithd lifecycle + Control API. Add Session/Conversation node tables, then `compact()`.
 Get the vector re-index decision (build-once vs sqlite-vec) and Bifrost creds from owner.
+
+---
+
+## Session 3 — 2026-07-06 — Vector layer swap: Kuzu HNSW → sqlite-vec
+
+**Goal:** Replace the build-once Kuzu HNSW vector index with embedded `sqlite-vec` so
+`remember()` supports incremental inserts (a fact told moments ago is immediately recallable).
+Implements the revised §Storage decision: **Kuzu keeps the graph, sqlite-vec owns the vectors.**
+Strict TDD.
+
+### What changed
+- `edith/memory/vector.py` — full rewrite. `VectorMemoryStore` opens a sibling sqlite file
+  (`<db>.vec.sqlite`), loads the `sqlite_vec` extension, and keeps a `vec0` virtual table plus
+  a `fact_map(rowid ↔ fact_id, text)` companion. `remember` writes the graph node (Kuzu) then
+  the vector row + id-map row (sqlite, one transaction). `semantic_recall` is a sqlite-vec KNN
+  join. `build_vector_index()` retained as a **no-op** (inserts are incremental). Dropped the
+  Kuzu `embedding FLOAT[384]` column and `_ensure_embedding_column` — vectors leave Kuzu.
+- `store.py` / `embeddings.py` / `secrets.py` — **unchanged** (public interface preserved).
+- `pyproject.toml` / `uv.lock` — `uv add sqlite-vec` (0.1.9).
+- `tests/test_vector_recall.py` — **+1 new** defining test, **1 rewritten**.
+
+### The defining test (RED first, then green)
+`test_fact_remembered_after_index_exists_is_recalled_immediately`: remember f1 → build →
+remember f2 *after* the index exists → recall returns f2. Watched it fail RED on build-once
+Kuzu: `RuntimeError: Cannot set property vec in table embeddings because it is used in one or
+more indexes.` — Kuzu can't even insert a new embedded row once the index exists. Green on
+sqlite-vec. This is the exact "never re-explain context" capability Kuzu lacked.
+
+### id-mapping
+`fact_map` sqlite table maps sqlite-vec integer `rowid` ↔ Kuzu Fact string `id` (+ denormalized
+text for the recall shape), written in the same `remember()` as the vector row and graph node.
+
+### Decisions / surprises
+- **No cross-engine 2PC — stated honestly.** Two embedded engines can't 2-phase-commit. Graph
+  write lands first; sqlite writes run in one transaction; any `sqlite3.Error` rolls back the
+  sqlite side and re-raises (no bare except, no swallowing) so a desync surfaces to the caller.
+- **One test rewritten, not code-worked-around.** `test_semantic_recall_empty_before_index_build`
+  asserted `semantic_recall == []` before a build — that `== []` *was* the build-once
+  limitation being removed. Rewrote it to `test_semantic_recall_works_without_build_step`
+  (deliberate deviation, flagged in the test). Net 13 green (11 unchanged + 1 rewritten + 1 new).
+- Smoke-tested sqlite-vec extension loading + KNN round-trip on-machine BEFORE building (same
+  discipline as Session 2's kuzu/fastembed check) — macOS stdlib `sqlite3` allows extension
+  loading here, so no blocker.
+
+### Verification (fresh)
+- `uv run pytest` → **13 passed**
+- `uv run ruff check edith tests` → **All checks passed**
+- `uv run pyright edith` → **0 errors, 0 warnings**
+
+### Next session (Session 4)
+Continue Slice 1: Brain loop skeleton (bus + recall→decide→remember, Router passthrough), then
+edithd lifecycle + Control API. Add Session/Conversation node tables, then `compact()`.
+Vector re-index blocker is now RESOLVED (sqlite-vec incremental). Still need Bifrost creds.
