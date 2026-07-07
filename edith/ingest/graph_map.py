@@ -37,6 +37,11 @@ def _person_id(name: str) -> str:
     return f"person-{slug}"
 
 
+def _project_id(name: str) -> str:
+    slug = name.strip().lower().replace(" ", "-")
+    return f"project-{slug}"
+
+
 def _clip(text: str) -> str:
     text = text.strip()
     return text if len(text) <= _MAX_FACT_CHARS else text[:_MAX_FACT_CHARS].rstrip() + "…"
@@ -109,6 +114,12 @@ def _add_extraction(
         pid = _person_id(owner)
         nodes.append(Node("Person", pid, {"name": owner}))
         edges.append(Edge("authored_by", "Repo", repo_id, "Person", pid))
+
+    # A Project groups this Repo (owns Project->Repo) when extraction names one.
+    if extraction.project:
+        proj_id = _project_id(extraction.project)
+        nodes.append(Node("Project", proj_id, {"name": extraction.project, "status": ""}))
+        edges.append(Edge("owns", "Project", proj_id, "Repo", repo_id))
 
     extraction_texts = _extraction_texts(extraction)
     for seq, text in enumerate(extraction_texts):

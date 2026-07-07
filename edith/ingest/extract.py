@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, TypedDict
 
 from edith.ingest.fetch import RepoDocs
 from edith.memory.secrets import sanitize_text
@@ -37,8 +37,9 @@ _SUMMARY_SYSTEM = (
 )
 _DEEP_SYSTEM = (
     "You deeply extract structured knowledge from a repository's docs. Reply "
-    "with compact JSON: {\"purpose\": str, \"components\": [str], "
-    "\"stack\": [str], \"owners\": [str]}."
+    "with compact JSON: {\"purpose\": str, \"project\": str, \"components\": [str], "
+    "\"stack\": [str], \"owners\": [str]}. \"project\" is the higher-level product "
+    "or initiative this repo belongs to (empty string if unclear)."
 )
 
 
@@ -60,6 +61,7 @@ class Extraction:
     summary: str
     relevance: float
     purpose: str = ""
+    project: str = ""
     components: list[str] = field(default_factory=list)
     stack: list[str] = field(default_factory=list)
     owners: list[str] = field(default_factory=list)
@@ -99,14 +101,15 @@ async def extract_repo(
         return Extraction(summary=summary, relevance=relevance, deep=False)
 
     deep_resp = await _call(router, _DEEP_SYSTEM, blob, Tier.OPUS, deep_max_tokens)
-    purpose, components, stack, owners = _parse_deep(deep_resp.text)
+    fields = _parse_deep(deep_resp.text)
     return Extraction(
         summary=summary,
         relevance=relevance,
-        purpose=purpose,
-        components=components,
-        stack=stack,
-        owners=owners,
+        purpose=fields["purpose"],
+        project=fields["project"],
+        components=fields["components"],
+        stack=fields["stack"],
+        owners=fields["owners"],
         deep=True,
     )
 
@@ -131,14 +134,22 @@ def _parse_summary(text: str) -> tuple[str, float]:
     return summary, max(0.0, min(1.0, relevance))
 
 
-def _parse_deep(text: str) -> tuple[str, list[str], list[str], list[str]]:
+class _DeepFields(TypedDict):
+    purpose: str
+    project: str
+    components: list[str]
+    stack: list[str]
+    owners: list[str]
+
+
+def _parse_deep(text: str) -> _DeepFields:
     data = _loads(text)
-    purpose = str(data.get("purpose", "")).strip()
-    return (
-        purpose,
-        _str_list(data.get("components")),
-        _str_list(data.get("stack")),
-        _str_list(data.get("owners")),
+    return _DeepFields(
+        purpose=str(data.get("purpose", "")).strip(),
+        project=str(data.get("project", "")).strip(),
+        components=_str_list(data.get("components")),
+        stack=_str_list(data.get("stack")),
+        owners=_str_list(data.get("owners")),
     )
 
 

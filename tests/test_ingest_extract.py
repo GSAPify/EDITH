@@ -41,8 +41,8 @@ def _docs() -> RepoDocs:
 async def test_relevant_repo_runs_sonnet_then_opus() -> None:
     router = FakeRouter(
         summary_json='{"summary": "onboarding portal", "relevance": 0.9}',
-        deep_json='{"purpose": "onboard brands", "components": ["api"], '
-        '"stack": ["python"], "owners": ["Akhil"]}',
+        deep_json='{"purpose": "onboard brands", "project": "Brand Onboarding", '
+        '"components": ["api"], "stack": ["python"], "owners": ["Akhil"]}',
     )
 
     result = await extract_repo(router, _docs())
@@ -52,6 +52,7 @@ async def test_relevant_repo_runs_sonnet_then_opus() -> None:
     assert result.deep is True
     assert result.summary == "onboarding portal"
     assert result.purpose == "onboard brands"
+    assert result.project == "Brand Onboarding"
     assert result.stack == ["python"]
     assert result.owners == ["Akhil"]
 

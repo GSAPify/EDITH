@@ -48,8 +48,10 @@ Reuses the slice-1 schema (`edith/memory/store.py`), extended **additively**:
 - `Fact(id, text, learned_at, source)` — `source` added (`readme` / `claude_md` / `extraction`).
 - `authored_by(FROM PR TO Person, FROM Repo TO Person)` — `Repo→Person` pair added (repo
   attributed to its owner from extraction).
-- Edges used: `owns` (unused this slice), `authored_by` (Repo→Person), `relates_to`
-  (Fact→Repo, Fact→Person for the global owner-context facts).
+- Edges used: `owns` (Project→Repo, when Opus names a parent project), `authored_by`
+  (Repo→Person), `relates_to` (Fact→Repo, Fact→Person for the global owner-context facts).
+- `Project` nodes come from the Opus `project` field (empty string ⇒ no Project node; the
+  model returns "" when a repo has no clear parent initiative — honest, not synthesized 1:1).
 
 Node ids are deterministic (`repo-<name>`, `person-<slug>`, `fact-<sha1[:12]>`) so re-runs
 upsert idempotently.
@@ -145,7 +147,10 @@ upsert idempotently.
   graph, and stdout egress.
 - **Key decisions:** the five above.
 - **Deviations from spec:** none material. Added `secrets.py` fix (in scope: redaction is
-  non-negotiable). `owns` edge unused this slice (no Project layer yet).
+  non-negotiable). All four node types (`Repo`/`Project`/`Person`/`Fact`) and all three edges
+  (`owns`/`authored_by`/`relates_to`) are implemented and unit-tested; `Project`/`owns` only
+  materialize when Opus names a parent project (it returned "" for the two smoke repos, so the
+  smoke DB shows Project=0 — correct, the model found no clear parent initiative in those docs).
 - **Files created / changed:** `edith/ingest/*` (new); `edith/memory/store.py`,
   `edith/memory/secrets.py` (extended); `tests/test_ingest_*.py`, `tests/test_secrets_filter.py`.
 - **Verification:** 97 tests green (1 live-skipped), ruff/pyright clean, live smoke wrote 58

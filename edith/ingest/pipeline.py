@@ -22,12 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from edith.ingest.discover import DiscoveredRepo, discover_repos
-from edith.ingest.extract import (
-    _DEEP_MAX_TOKENS,
-    Extraction,
-    RouterLike,
-    extract_repo,
-)
+from edith.ingest.extract import Extraction, RouterLike, extract_repo
 from edith.ingest.fetch import GhMetadata, fetch_repo_docs
 from edith.ingest.graph_map import build_graph
 from edith.ingest.redact import redact_docs
@@ -36,6 +31,7 @@ from edith.memory.store import Edge, MemoryStore, Node
 
 _DEFAULT_SCAN_ROOT = "~/gitstuff"
 _DEFAULT_CONCURRENCY = 4
+_DEFAULT_DEEP_MAX_TOKENS = 512
 
 
 @dataclass(frozen=True)
@@ -104,7 +100,7 @@ async def run_ingest(
     limit: int | None = None,
     dry_run: bool = False,
     concurrency: int = _DEFAULT_CONCURRENCY,
-    deep_max_tokens: int = _DEEP_MAX_TOKENS,
+    deep_max_tokens: int = _DEFAULT_DEEP_MAX_TOKENS,
     include_global: bool = True,
 ) -> IngestReport:
     """Run the ingestion pipeline once and return the status report."""

@@ -54,6 +54,7 @@ def test_build_graph_with_extraction_adds_people_and_extraction_facts() -> None:
         summary="onboarding portal",
         relevance=0.9,
         purpose="onboard brands",
+        project="Brand Onboarding",
         components=["api", "worker"],
         stack=["python"],
         owners=["Akhil"],
@@ -64,9 +65,14 @@ def test_build_graph_with_extraction_adds_people_and_extraction_facts() -> None:
 
     person_names = {n.props.get("name") for n in nodes if n.label == "Person"}
     assert "Akhil" in person_names
+    project_names = {n.props.get("name") for n in nodes if n.label == "Project"}
+    assert "Brand Onboarding" in project_names
     edge_labels = {e.label for e in edges}
     assert "authored_by" in edge_labels  # Repo -> Person
+    assert "owns" in edge_labels  # Project -> Repo
     assert "relates_to" in edge_labels  # Fact -> Repo
+    owns = next(e for e in edges if e.label == "owns")
+    assert owns.from_label == "Project" and owns.to_label == "Repo"
     extraction_facts = [
         n for n in nodes if n.label == "Fact" and n.props.get("source") == "extraction"
     ]
@@ -77,13 +83,15 @@ def test_map_and_remember_writes_to_store(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.kuzu")
     try:
         extraction = Extraction(
-            summary="s", relevance=0.9, purpose="p", owners=["Akhil"], deep=True
+            summary="s", relevance=0.9, purpose="p", project="Brand Onboarding",
+            owners=["Akhil"], deep=True,
         )
         written = map_and_remember(store, _repo(), _docs(), extraction=extraction)
 
         assert written > 0
         assert store.count("Repo") == 1
         assert store.count("Person") == 1
+        assert store.count("Project") == 1
         assert store.count("Fact") >= 2
         hits = store.recall("portal")
         assert any(h["label"] == "Repo" for h in hits)
