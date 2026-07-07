@@ -164,6 +164,71 @@ async def test_pr_review_skill_registered_and_dispatches(data_dir):
     assert results[0]["asked"]         # unknown person ⇒ ASK (no gh, no model)
 
 
+async def test_injected_resolve_repo_is_wired_to_brain(data_dir):
+    """spec 09 realtime resolve-on-miss: edithd passes an injected resolve_repo
+    through to Brain, so a repo the graph misses gets resolved live. Verified by
+    a miss utterance that names a repo ⇒ the resolver fires."""
+    from edith.finder import ResolveResult, ResolveStatus
+
+    calls: list[str] = []
+
+    async def fake_resolver(name: str) -> ResolveResult:
+        calls.append(name)
+        return ResolveResult(
+            ResolveStatus.RESOLVED, name=name, answer="it's a service.", background=None
+        )
+
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=SpyMemory(),  # recall -> [] (a miss)
+        router=FakeRouter(),
+        resolve_repo=fake_resolver,
+    )
+    await daemon.start()
+    try:
+        await daemon.bus.publish(
+            "voice.utterance", source="voice", payload={"text": "what is the widget repo?"}
+        )
+    finally:
+        await daemon.stop()
+
+    assert calls == ["widget"]  # the injected resolver ran on the miss
+
+
+async def test_real_memorystore_gets_a_default_resolver(data_dir, tmp_path):
+    """With a concrete MemoryStore and no injected resolver, edithd builds a
+    default one, so the running daemon does realtime repo lookup out of the box.
+    A fake Memory (not a MemoryStore) gets no resolver ⇒ existing tests unchanged."""
+    from edith.memory.store import MemoryStore
+
+    store = MemoryStore(str(tmp_path / "m.kuzu"))
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=store,
+        router=FakeRouter(),
+    )
+    await daemon.start()
+    try:
+        assert daemon._brain is not None
+        assert daemon._brain._resolve_repo is not None  # default wired for a real store
+    finally:
+        await daemon.stop()
+        store.close()
+
+
+async def test_fake_memory_gets_no_default_resolver(data_dir):
+    """A non-MemoryStore memory ⇒ resolver stays None (existing behavior)."""
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+    await daemon.start()
+    try:
+        assert daemon._brain is not None
+        assert daemon._brain._resolve_repo is None
+    finally:
+        await daemon.stop()
+
+
 async def test_kill_shuts_down_gracefully_and_compacts(data_dir):
     memory = SpyMemory()
     daemon = _daemon(data_dir, memory, FakeRouter())

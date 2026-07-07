@@ -197,10 +197,16 @@ def _safe_gh_readme(provider: GhReadme, name: str) -> str:
 
 
 def _gh_readme(name: str) -> str:
-    """Best-effort ``gh api`` README fetch for a patterninc repo ("" on miss)."""
+    """Best-effort ``gh api`` README fetch for a patterninc repo ("" on miss).
+
+    The ``raw+json`` Accept header makes GitHub return the README markdown
+    directly on stdout — so we must NOT pass ``--jq``: the body is not JSON, and
+    ``--jq`` would fail to parse markdown (leading ``#``), turning every gh-path
+    resolve into a spurious NOT_FOUND.
+    """
     result = subprocess.run(
         ["gh", "api", f"repos/patterninc/{name}/readme",
-         "--jq", ".content", "-H", "Accept: application/vnd.github.raw+json"],
+         "-H", "Accept: application/vnd.github.raw+json"],
         capture_output=True,
         text=True,
         check=True,

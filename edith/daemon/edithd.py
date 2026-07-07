@@ -35,11 +35,14 @@ import keyring
 from keyring.errors import KeyringError
 
 from edith.brain import Brain
-from edith.brain.loop import MemoryLike, RouterLike
+from edith.brain.loop import MemoryLike, ResolveRepoLike, RouterLike
 from edith.bus import EventBus
 from edith.daemon.control import BudgetView, ControlServer
 from edith.daemon.securestore import LocalSecureStore, SecureStore
 from edith.daemon.state import RuntimeState
+from edith.finder import ResolveResult
+from edith.finder import resolve_repo as _resolve_repo_impl
+from edith.memory.store import MemoryStore
 from edith.skills import PRReviewSkill
 
 _KEYRING_SERVICE = "edithd"
@@ -95,8 +98,13 @@ class EdithDaemon:
         router: RouterLike,
         secure_store: SecureStore | None = None,
         budget: BudgetView | None = None,
+        resolve_repo: ResolveRepoLike | None = None,
     ) -> None:
         self._secrets = secrets  # held in RAM only; never logged
+        # Realtime resolve-on-miss (spec 09). Injected for tests; when absent
+        # and Memory is a concrete MemoryStore, start() builds a default binding
+        # so the running daemon does live repo lookup out of the box.
+        self._resolve_repo = resolve_repo
         self._memory = memory
         self._router = router
         self._store: SecureStore = secure_store or LocalSecureStore(data_dir)
@@ -120,6 +128,14 @@ class EdithDaemon:
         #    Brain subscribes itself to voice.utterance and reads is_paused from
         #    the RuntimeState (single source of truth). Pass a predicate, not the
         #    property value, so it re-reads live state on every utterance.
+        # Realtime resolve-on-miss (spec 09): use the injected resolver, else
+        # build a default one bound to the store+router when Memory is a concrete
+        # MemoryStore (a fake in tests is not, so it stays None — behavior
+        # unchanged). This is what makes the running daemon do live repo lookup.
+        resolver = self._resolve_repo
+        if resolver is None and isinstance(self._memory, MemoryStore):
+            resolver = self._make_default_resolver(self._memory)
+
         # Register skills so a voice.utterance can dispatch them (spec 02
         # build-step 3). PRReviewSkill takes its speak/confirm from the defaults
         # (_silent / _deny) until Slice 3 wires the real VoiceIO — so a triggered
@@ -130,6 +146,7 @@ class EdithDaemon:
             memory=self._memory,
             router=self._router,
             is_paused=lambda: self.state.is_paused,
+            resolve_repo=resolver,
             skills=[PRReviewSkill(self._router)],
         )
 
@@ -144,6 +161,19 @@ class EdithDaemon:
 
         # 6. RUNNING.
         self.state.last_event = "daemon.started"
+
+    def _make_default_resolver(self, store: MemoryStore) -> ResolveRepoLike:
+        """A ``resolve_repo``-shaped closure bound to this daemon's store+router.
+
+        Kept as a closure (not ``functools.partial``) so the ``(name) -> …``
+        signature the Brain expects is explicit and type-checks cleanly.
+        """
+        router = self._router
+
+        async def resolve(name: str) -> ResolveResult:
+            return await _resolve_repo_impl(name, store=store, router=router)
+
+        return resolve
 
     def _on_kill(self) -> None:
         """Control API ``kill`` handler: schedule graceful shutdown.

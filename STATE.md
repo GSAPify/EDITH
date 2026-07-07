@@ -27,6 +27,15 @@
 
 Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
+> **Session 12 addendum — realtime resolve-on-miss now live in the daemon.** `edithd` wires
+> `resolve_repo` into Brain (`_make_default_resolver` binds store+router for a real `MemoryStore`;
+> injectable seam otherwise). Fixed a latent bug in `finder/resolve._gh_readme` (`--jq .content`
+> combined with the `raw+json` Accept header → parsed markdown as JSON → every gh-path resolve was
+> a spurious NOT_FOUND; only local-clone resolves ever worked). **Behavior now:** ask EDITH about a
+> repo it doesn't know → live fetch + Sonnet answer NOW + background Opus deep-extract →
+> `map_and_remember` **auto-adds it to the graph** → next mention is an instant HIT. Live-proven on
+> `adczar` (graph 0→1 repos, accurate answer). 135 tests + 1 skipped, ruff/pyright clean.
+
 ## Next action
 
 ### ▶ SLICE 3 — Voice (START HERE)

@@ -654,3 +654,23 @@ learning loop. Standing item: **rotate the Bifrost key.** Kuzu single-process lo
    person + 1 repo) encoded an assumption the real component doesn't satisfy; only a live check
    caught it. Also elevated the un-wired diff-size cost gate and the known-shapes-only redaction
    from buried follow-ups to visible gaps.
+
+**Follow-up in the same PR — realtime repo lookup wired into the daemon + a real bug fixed.**
+Owner asked to make the always-on daemon actually do resolve-on-miss (and confirm that asking
+about a repo auto-adds it to the graph). Two things:
+1. **Wired `resolve_repo` into `edithd`** — `EdithDaemon(resolve_repo=...)` DI seam (default None),
+   plus `_make_default_resolver` that binds store+router when Memory is a concrete `MemoryStore`
+   (a fake in tests is not → stays None → existing tests unchanged). So the running daemon now
+   does live repo lookup out of the box. +3 tests (injected path, real-store default, fake→None).
+2. **Fixed a real bug in `finder/resolve._gh_readme`** — it passed `--jq .content` together with
+   the `raw+json` Accept header. The raw header returns README *markdown* on stdout (not JSON), so
+   `--jq` failed to parse the leading `#` → `CalledProcessError` → caught → `""` → every gh-path
+   resolve was a spurious NOT_FOUND. The Session-10 smoke only passed because `agentsmith` was a
+   LOCAL clone; the gh path had never actually worked. Fix: drop `--jq`, return stdout verbatim.
+   Regression test locks the arg shape (no `--jq`, raw Accept header present).
+
+**Live proof (temp graph, real gh + real Bifrost):** "what is the adczar repo about?" → daemon
+default resolver fetched adczar live → Sonnet gave an accurate answer (RoR analytics app;
+Snowflake/Sidekiq/Redis) → background Opus extract wrote `repo-adczar` (graph 0→1 repos). Next
+mention = instant HIT. This is the "ask about a repo ⇒ auto-added to the knowledge graph"
+behavior the owner asked to confirm — now working end-to-end. 135 tests + 1 skipped, clean.
