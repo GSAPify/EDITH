@@ -26,11 +26,14 @@ manual pause. Default is not-paused so Brain works standalone.
 
 from __future__ import annotations
 
+import asyncio
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from edith.bus import Event, EventBus
+from edith.finder import ResolveResult, ResolveStatus
 from edith.memory.secrets import sanitize_text
 from edith.memory.store import Node
 from edith.router import ModelResponse, Tier
@@ -66,6 +69,17 @@ class RouterLike(Protocol):
     ) -> ModelResponse: ...
 
 
+# A resolve-on-miss callable (spec 09): name -> ResolveResult. Injected so Brain
+# stays decoupled from the finder's fetch/model machinery; the daemon wires the
+# real ``functools.partial(resolve_repo, store=..., router=...)``.
+ResolveRepoLike = Callable[[str], Awaitable[ResolveResult]]
+
+# A repo mention looks like a hyphen/underscore token or an explicit "<name> repo"
+# phrase. Deliberately a thin heuristic, NOT an NLP layer (spec 09 §Open questions):
+# it only fires the resolver, which itself no-ops cleanly on a not-found name.
+_REPO_PHRASE = re.compile(r"\b([A-Za-z0-9][\w-]{2,})\s+repo\b", re.IGNORECASE)
+
+
 class Brain:
     """The orchestrator loop; subscribes itself to ``voice.utterance``."""
 
@@ -75,6 +89,7 @@ class Brain:
         memory: MemoryLike,
         router: RouterLike,
         is_paused: Callable[[], bool] = lambda: False,
+        resolve_repo: ResolveRepoLike | None = None,
     ) -> None:
         self._bus = bus
         self._memory = memory
@@ -83,6 +98,10 @@ class Brain:
         # not-paused so Brain used standalone (and the existing tests) behave
         # exactly as before.
         self._is_paused = is_paused
+        # Resolve-on-miss hook (spec 09). Default None -> no-op, so a recall
+        # miss proceeds straight to the model exactly as the pre-hook Brain
+        # (keeps the existing tests green).
+        self._resolve_repo = resolve_repo
         bus.subscribe("voice.utterance", self._on_utterance)
 
     async def _on_utterance(self, event: Event) -> None:
@@ -97,6 +116,15 @@ class Brain:
 
         # 1. RECALL
         recalled = self._memory.recall(utterance)
+
+        # 1b. RESOLVE-ON-MISS (spec 09): recall came back empty AND the utterance
+        # names a repo AND a resolver is wired -> fetch+redact+fast-answer the
+        # unknown repo NOW, and let its background deep-extract run so the next
+        # mention is an instant graph hit. Folded into the recalled context so the
+        # model answers with it. No resolver / no repo mention -> unchanged.
+        resolved_answer = await self._resolve_on_miss(utterance, recalled)
+        if resolved_answer:
+            recalled = [*recalled, {"text": resolved_answer}]
 
         # 2. ASSEMBLE + 3. REDACT (sanitize every message before it leaves the box)
         messages = _assemble(utterance, recalled)
@@ -119,6 +147,29 @@ class Brain:
                 "answer": response.text,
             },
         )
+
+    async def _resolve_on_miss(
+        self, utterance: str, recalled: list[dict[str, object]]
+    ) -> str:
+        """If recall missed and the utterance names a repo, resolve it now.
+
+        Returns the fast answer text to fold into context, or "" when nothing was
+        resolved. The background deep-extract (RESOLVED path) is scheduled with
+        ``asyncio.create_task`` so it never blocks this turn (spec 09; Slice-5
+        ``think_async`` will formalize the seam).
+        """
+        if self._resolve_repo is None or recalled:
+            return ""
+        match = _REPO_PHRASE.search(utterance)
+        if match is None:
+            return ""
+
+        result = await self._resolve_repo(match.group(1))
+        if result.status is ResolveStatus.RESOLVED:
+            if result.background is not None:
+                asyncio.create_task(result.background)  # noqa: RUF006 - fire-and-forget seam
+            return result.answer
+        return ""
 
     def _remember_exchange(self, utterance: str, answer: str) -> None:
         ts = str(time.time())

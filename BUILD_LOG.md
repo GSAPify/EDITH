@@ -445,3 +445,70 @@ Full contributed-repos run is orchestrator-gated pending review.
 - Global `~/.claude/CLAUDE.md` `client_id` (a public ID, not a secret) correctly survives;
   `client_secret`/`refresh_token`/PEM redacted.
 - Existing-DB migration deferred until a live `memory.kuzu` predates the schema growth.
+
+## Session 9 — 2026-07-07 — NL repo finder + real-time resolve-on-miss (strict TDD, branch `build/nl-finder`)
+
+**Goal:** Give EDITH two abilities over the ingested graph (spec 08): a natural-language repo
+finder, and the owner's key requirement — real-time resolve when asked about a repo NOT yet in
+the graph (fast Sonnet answer NOW, background Opus deep-extract so the next mention is a hit).
+Strict TDD, redaction unbypassable, reuse existing ingest/memory/router code.
+
+### What shipped
+New package `edith/finder/`:
+- `finder.py` — `find_repos(query, store, k)`: MODEL-FREE ranking. Fuses `store.semantic_recall`
+  (sqlite-vec KNN over Fact embeddings) AND `store.recall` (substring + 1-hop graph), walks
+  `relates_to` edges to Repo nodes via `graph_snapshot` (which already carries links + per-node
+  degree), ranks by match strength + `0.1 × degree`. Degrades to graph-only when the store has
+  no vectors (the current LIVE case — ingest writes plain `MemoryStore`). `summarize_hits`
+  phrases a one-line Sonnet answer over the top hits via an INJECTED router (tests use a fake;
+  empty hits → no model call).
+- `resolve.py` — `resolve_repo(name, store, router, *, scan_root, gh_readme, deep_max_tokens)`:
+  HIT (exact `repo-<name>` graph lookup → return, no fetch/model) / RESOLVED (local
+  `~/gitstuff/<name>` patterninc clone via `ingest.fetch`, else `gh api repos/patterninc/<name>/
+  readme` → **REDACT at the fetch boundary** → fast Sonnet answer NOW + a BACKGROUND Opus
+  deep-extract coroutine reusing `extract_repo` + `map_and_remember`) / NOT_FOUND (clean, no
+  model, no task). `ResolveResult.background` is a coroutine the caller runs via
+  `asyncio.create_task` — Slice-5 `think_async` will formalize the seam.
+- `__main__.py` — `python -m edith.finder "query" [--k] [--data-dir] [--max-tokens]`; prints the
+  ranking always, adds a Sonnet summary when Bifrost env is present. Mirrors `ingest/__main__.py`.
+
+`edith/brain/loop.py` — thin resolve-on-miss hook: on a recall MISS + a `<name> repo` mention +
+an INJECTED resolver (constructor arg `resolve_repo`, default `None` = no-op), Brain resolves,
+folds the fast answer into the working context, and schedules the background job. Default-off so
+the existing Brain tests (which run with empty recall = a "miss") are byte-for-byte unchanged.
+
+Spec `docs/specs/09-nl-finder.md`.
+
+### TDD (RED→GREEN watched)
+- `tests/test_finder.py::test_relevant_repo_ranked_first_no_model_call` — watched RED
+  (`ModuleNotFoundError: edith.finder`) before writing the module; then GREEN.
+- `tests/test_finder_resolve.py::test_planted_secret_never_reaches_router_or_store` — the
+  security test. Asserts a planted `GOCSPX-…` in fetched docs reaches NEITHER the fake Router's
+  captured content NOR the store snapshot, on the fast path AND after running the background
+  extract. **Proven non-vacuous:** disabling BOTH the `redact_docs` choke-point and the
+  `_fast_answer` egress sanitize made it FAIL (secret reached the fake Router); restoring made it
+  pass. Redaction is defence-in-depth: fetch boundary + model egress (`_fast_answer`,
+  `extract._call`) + graph egress (`remember`/`sanitize_node`).
+- `tests/test_brain_resolve_hook.py` — watched RED (`unexpected keyword argument 'resolve_repo'`);
+  then GREEN. Miss→resolver invoked + answer produced; recall-hit→resolver skipped; default
+  no-resolver→unchanged.
+
+### Verification
+110 tests green (1 live-skipped), `ruff check edith tests` clean, `pyright edith` 0 errors.
+Live smoke: ingested `agentsmith` (real Bifrost, relevance 0.72, Opus deep) into a TEMP dir, then
+`python -m edith.finder "AI agent" --data-dir <temp>` ranked it #1 (score 1.600, degree 1) with a
+real Sonnet summary; `resolve_repo("agentsmith", …)` returned HIT with no model call. Secret-scan
+of new code/spec = NONE. Temp dir cleaned.
+
+### Notes / seams
+- **Ingest writes a plain `MemoryStore`, not `VectorMemoryStore`** (`ingest/pipeline.py`), so the
+  live graph has no Fact embeddings and the finder's semantic signal is empty there — the graph
+  substring signal carries the result. Switching ingest to `VectorMemoryStore` would light up the
+  semantic path. Filed as spec-09 open question; NOT changed here (out of scope, one root cause
+  per PR). The resolve BACKGROUND path writes via whatever store it's handed, so passing a
+  `VectorMemoryStore` makes resolved repos semantically searchable immediately.
+- Graph substring `recall` matches the FULL query string, so the finder's graph-only path needs a
+  query that is a literal substring of a repo name/summary/fact (paraphrase matching is the
+  semantic layer's job, which is dark on live data per the above).
+- Repo-name extraction in Brain is a deliberate thin `<name> repo` regex, NOT an NLP layer
+  (spec-09 open question 2).

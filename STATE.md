@@ -3,9 +3,9 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** BUILDING → Slice 1 core + Memory Viewer + Repo Ingestion shipped
-**Active slice:** 1 — Memory + Brain (+ repo-ingestion pipeline now feeds the live graph)
-**Last session:** 2026-07-07 — Session 8 (Repo-knowledge ingestion `edith/ingest/`: discover→fetch→REDACT→Sonnet/Opus→map→remember; CLI `python -m edith.ingest` with dry-run/incremental/secret-safe report. Live smoke wrote 58 nodes to a temp dir. Found+fixed a real `secrets.py` markdown-wrapper leak. 97 tests green, ruff/pyright clean)
+**Current phase:** BUILDING → Slice 1 core + Memory Viewer + Repo Ingestion + NL Finder shipped
+**Active slice:** 1 — Memory + Brain (+ repo-ingestion pipeline + NL finder over the live graph)
+**Last session:** 2026-07-07 — Session 9 (NL repo finder + real-time resolve-on-miss `edith/finder/`: `find_repos` model-free semantic+graph ranking, `summarize_hits` Sonnet, `python -m edith.finder`; `resolve_repo` hit / fast-Sonnet+background-Opus / not-found reusing ingest fetch/extract/graph_map + the redaction choke-point; thin Brain resolve-on-miss hook, default-off. Spec 09. 110 tests green, ruff/pyright clean. Live finder+ingest smoke on `agentsmith`)
 
 ## Slice status
 
@@ -20,6 +20,7 @@
 | 6 | Desktop control | ✅ done | ⬜ not started | Own-shell for OMC launches; Terminal.app osascript for visible term |
 | — | Memory viewer | (07) | ✅ done | Offline local graph viewer: `MemoryStore.graph_snapshot()` + `edith/viewer/` (stdlib 127.0.0.1 server, vendored force-graph UMD, `--demo` seeder, `python -m edith.viewer`). **70 tests + 1 live-skipped, ruff/pyright clean.** Zero new runtime deps. Reads live Memory; repo ingestion populates it for real. |
 | — | Repo ingestion | (08) | ✅ done | `edith/ingest/` populates the LIVE graph from local `patterninc` clones: discover→fetch→**REDACT (choke-point)**→Sonnet classify/Opus deep→map→`remember`. `python -m edith.ingest [--dry-run] [--repos] [--limit] [--data-dir] [--max-tokens]`, incremental skip on `Repo.last_commit_date`, secret-safe status report, one-time global `~/.claude/CLAUDE.md` owner context. Additive schema (`Repo` +4 cols, `Fact.source`, `authored_by` Repo→Person). **97 tests + 1 live-skipped, ruff/pyright clean.** Live smoke: 58 nodes to a temp dir, secret-scan clean. Full contributed-repos run is orchestrator-gated pending review. |
+| — | NL finder + resolve-on-miss | (09) | ✅ done | `edith/finder/`: `find_repos` (model-free semantic+graph fuse → `relates_to` walk → rank by strength+degree, degrades to graph-only when the live store has no vectors) + `summarize_hits` (Sonnet, injected); `python -m edith.finder "query"`. `resolve_repo` = HIT (graph `repo-<name>`) / RESOLVED (local clone or `gh` README → **REDACT choke-point** → fast Sonnet answer NOW + **background Opus** deep-extract coroutine the caller runs via `asyncio.create_task`, Slice-5 `think_async` seam) / NOT_FOUND (clean, no model). Thin Brain hook: recall-miss + repo mention + injected resolver → resolve then answer (**default `None` = no-op**, existing tests unchanged). Reuses ingest fetch/extract/graph_map. **110 tests + 1 live-skipped, ruff/pyright clean; planted-secret test proven non-vacuous.** Live smoke: `agentsmith` ingest (real Bifrost, relevance 0.72 Opus) → finder ranked it #1 with a real Sonnet summary; resolve HIT path no-model. |
 
 Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
