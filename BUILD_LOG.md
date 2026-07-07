@@ -567,3 +567,18 @@ directly and contend on the on-disk file lock — only one may hold it at a time
 `--reembed` requires no other EDITH process holding the DB (checked `lsof` before the live run).
 The production fix is routing ALL DB access through `edithd` (one owner of the handle, everyone
 else over the Control API). Noted as a follow-up; out of scope for this PR (one root cause per PR).
+
+---
+
+## Session 11 — 2026-07-07 — Repo consolidation → `master`; Slice-2 handoff
+
+No code. Housekeeping + kickoff before a context compaction.
+- **Consolidated to one branch.** ff'd `main` to include the NL-finder commits, renamed `main`→**`master`**,
+  pushed `master` (allowed — pushed *before* it was the default, so never a direct push to the live
+  default), set it as the GitHub default, then deleted the 6 redundant branches (old `main`,
+  `spec/session-1-foundation`, `build/slice-1-memory-brain`, `build/memory-viewer`, `build/repo-ingest`,
+  `build/nl-finder`). Repo is now single-branch (`master`).
+- **Live graph confirmed:** `~/.edith/data/memory.kuzu` = 206 nodes (23 Repo · 26 Person · 12 Project ·
+  145 Fact, embedded), secret-scan clean. Viewer serves it at `:8765`.
+- **Next: Slice 2 (PR-review)** on `build/slice-2-pr-review` (cut off `master`). Full kickoff brief +
+  gotchas are in `STATE.md` §"▶ SLICE 2". Standing item: **rotate the Bifrost key.**

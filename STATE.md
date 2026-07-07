@@ -3,9 +3,12 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** BUILDING → Slice 1 core + Memory Viewer + Repo Ingestion + NL Finder shipped
-**Active slice:** 1 — Memory + Brain (+ repo-ingestion pipeline + NL finder over the live graph)
-**Last session:** 2026-07-07 — Session 10 (closed the ingest↔finder embedding gap, TDD). Ingest now writes via `VectorMemoryStore` so Facts are embedded on `remember` (Fix 1, `run_ingest(embedder=…)` seam); `VectorMemoryStore.backfill_embeddings()` + `python -m edith.ingest --reembed` embed existing graph-only Facts with the LOCAL embedder, no model calls, idempotent, credential-free (Fix 2); `find_repos` adds a per-token graph fallback that fires ONLY when both signals score zero, so a populated graph never silently returns nothing (Fix 3). 114 tests green, ruff/pyright clean. Live: `--reembed` embedded the 145 real Facts; `python -m edith.finder "seo tools"` now returns real repos (was "No repos matched"). Known limitation documented: Kuzu embedded is single-process (lock contention across viewer/finder/ingest; prod fix = route all DB access through `edithd`).
+**Current phase:** Slice 1 + Viewer + Ingest + NL Finder DONE & consolidated. Ready for Slice 2.
+**Active slice:** → **Slice 2 (PR-review skill)** on branch `build/slice-2-pr-review` (cut off master).
+**Repo:** everything is on **`master`** (renamed from `main`, Session 11). All feature branches merged
++ deleted; `master` is the GitHub default. New work = branch off `master`, PR in. Full graph LIVE in
+`~/.edith/data/memory.kuzu` (206 nodes: 23 Repo, 26 Person, 12 Project, 145 Fact — embedded, no leak).
+**Prev session:** 2026-07-07 — Session 10 (closed the ingest↔finder embedding gap, TDD). Ingest now writes via `VectorMemoryStore` so Facts are embedded on `remember` (Fix 1, `run_ingest(embedder=…)` seam); `VectorMemoryStore.backfill_embeddings()` + `python -m edith.ingest --reembed` embed existing graph-only Facts with the LOCAL embedder, no model calls, idempotent, credential-free (Fix 2); `find_repos` adds a per-token graph fallback that fires ONLY when both signals score zero, so a populated graph never silently returns nothing (Fix 3). 114 tests green, ruff/pyright clean. Live: `--reembed` embedded the 145 real Facts; `python -m edith.finder "seo tools"` now returns real repos (was "No repos matched"). Known limitation documented: Kuzu embedded is single-process (lock contention across viewer/finder/ingest; prod fix = route all DB access through `edithd`).
 
 ## Slice status
 
@@ -26,23 +29,34 @@ Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
 ## Next action
 
-**Slice 1 core is COMPLETE** (`edith/{memory,bus,router,brain,daemon}/` — 59 tests + 1
-live-skipped, ruff/pyright clean, security/code/architecture reviewed). The daemon runs the full
-recall→reason→remember loop under a unix-socket Control API.
+### ▶ SLICE 2 — PR-review skill (START HERE)
+Branch `build/slice-2-pr-review` is already cut off `master`. Read `docs/specs/02-pr-review-skill.md`.
+This is the first real autonomous action; it exercises the Skill dispatch path end-to-end AND is the
+payoff of Slices 1/ingest/finder — the memory graph now has real people + repos to resolve against.
 
-**Session 6 shipped the Memory Viewer** (`docs/specs/07-memory-viewer.md`): `python -m
-edith.viewer --demo` renders a dense force-directed cloud offline; live mode reads
-`EDITH_DATA_DIR/memory.kuzu`. Schema gained `PR` + `authored_by`/`reviewed_by` (additive).
+**Canonical flow:** "EDITH, review Tavishi's PR" → resolve the *person* + *repo* (REUSE
+`edith/finder` `find_repos`/`resolve_repo`; 26 Person + 23 Repo nodes exist in the live graph) →
+find the PR via `gh` → fetch the diff → review it (route deep review to **Opus**) → **ASK before
+posting anything to GitHub** (the review submit is a shared-state write → `Skill.needs_confirmation
+= True`, the confirm-gate is the crux) → post/summarize. **Ask-when-unsure**: if person/repo/PR
+can't be resolved, ASK rather than guess (owner requirement).
 
-**Session 8 shipped Repo Ingestion** (`docs/specs/08-repo-ingest.md`): `edith/ingest/` feeds the
-live graph the viewer renders. **Orchestrator next:** review, then trigger the full
-contributed-repos run — `python -m edith.ingest` (env BIFROST_*), no `--repos` cap, into the real
-`EDITH_DATA_DIR`. NOTE the schema-migration open question if a live `memory.kuzu` already exists
-(none does yet — fresh creation is clean). While there, the `secrets.py` markdown-wrapper fix
-(Session 8) also hardens Brain/remember for every future ingest.
+**Reuse, don't rebuild:** `edith/router` (Opus review / Sonnet search), `edith/memory` (people/repos),
+`edith/brain` (Skill dispatch + the Skill contract: `name`/`triggers`/`needs_confirmation`/`run`),
+`edith/ingest` (repo context), `edith/finder` (resolve people/repos). `gh` is authed as **GSAPify**
+(scopes `repo`, `read:org`) — can read PRs and post reviews.
 
-**Then → start Slice 2 (PR-review skill)** — read `docs/specs/02-pr-review-skill.md`. First real
-autonomous action; exercises the Skill dispatch path end-to-end.
+**Gotchas the orchestrator MUST heed (learned this build):**
+- Delegated agents return a terse "Complete." — **verify independently + do a LIVE run.** Tests
+  green ≠ works (the ingest→finder embed bug passed 110 tests but returned nothing live).
+- **Kuzu is single-process** → stop the viewer (`lsof -ti tcp:8765 | xargs kill`) before running
+  anything that opens `memory.kuzu`.
+- Bifrost creds are in gitignored `.env` (source it: `set -a; source .env; set +a`). **KEY STILL
+  NEEDS ROTATING** (pasted in chat 2026-07-06).
+- The owner's Pattern commit identity ≠ GSAPify (author filters unreliable) → resolve people via
+  the graph + `gh pr list`, not `--author=GSAPify`.
+- Confirm-gate before ANY `gh` write (posting a review). Live smoke: read a real PR (read-only) to
+  prove the fetch+review path; never auto-submit.
 
 **Deferred Slice-1 seams** (pick up when their slice needs them, not blocking Slice 2):
 `compact()` (needs Session/Conversation node tables + token-counted working buffer); **Guard**
@@ -60,7 +74,8 @@ tier heuristics = Slice 5.
 - ~~Bifrost `base_url` + API key (for Slice 1 Brain + Slice 5 Router).~~ **RESOLVED (Session 4):**
   in the gitignored `.env`; Router live smoke hit real Bifrost (200, non-empty). Key was pasted
   in chat 2026-07-06 → **rotate it in Bifrost** (noted in `.env`). Keychain retrieval = daemon work.
-- Decision to merge `spec/session-1-foundation` → establish `main` on GitHub.
+- ~~Establish `main` on GitHub.~~ **DONE (Session 11):** all branches consolidated into **`master`**
+  (renamed from `main`), set as default, redundant branches deleted. Single-branch repo now.
 
 ## Known limitations
 
