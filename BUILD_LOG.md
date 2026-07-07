@@ -291,3 +291,60 @@ real bus.
 **`edithd` daemon lifecycle + Control API** (unix-socket `pause`/`resume`/`kill`/`status`,
 launchd plist, encrypted-volume mount, pause-suspends-Memory). Then `compact()` (needs
 Session/Conversation node tables + working-context buffer) and **Guard**. Rotate the Bifrost key.
+
+---
+
+## Session 5 — 2026-07-07 — Slice 1: edithd daemon + Control API (autopilot, TDD + validation)
+
+Ran via `/autopilot` (skipped cold expansion — spec already validated). Ended **59 passed, 1
+skipped**, ruff/pyright clean (edith + tests). **Slice 1 core is complete.**
+
+### Shipped (`edith/daemon/`)
+- **`state.py`** — RuntimeState machine RUNNING/PAUSED/STOPPING; illegal transitions raise.
+- **`control.py`** — `asyncio.start_unix_server` (never TCP), JSON-lines, 4 locked commands;
+  `status` returns exactly `{state, active_skill, budget_used, last_event}`; socket **0600**;
+  stale-socket cleanup on start, removed on stop; fixed if/elif dispatch (no injection surface);
+  malformed-JSON / non-dict / unknown-cmd → structured errors; `budget_used` via `BudgetView`
+  Protocol (`TODO(Guard)` stub = 0).
+- **`client.py`** — one-shot unix-socket client (tests now; menu-bar later).
+- **`edithd.py`** — startup ordering (secrets via keyring + `.env` dev fallback → SecureStore
+  0700 dir → bus → Memory/Router/Brain → Control API → RUNNING); graceful shutdown; **pause
+  wired into Brain**.
+- **`securestore.py`** — `SecureStore` Protocol + `LocalSecureStore` (0700 dir, explicit chmod);
+  encrypted-APFS mount left as honest `TODO(encrypted-volume)` seam (no fake).
+- **`deploy/com.gsapify.edithd.plist`** — launchd template; NOT auto-loaded.
+- **Brain pause wiring** — `is_paused` predicate; paused ⇒ skip model_call AND remember
+  (privacy-respecting per spec §Pause+Memory), RAM buffer retained.
+
+### Incident + recovery (the process working as designed)
+The Phase-2 build agent **stalled at the finish line** (watchdog, 600s no-progress) while tidying
+pyright test-typing. Because it committed atomically as it went, recovery was cheap: 3 commits
+were durable (state machine, Control API, pause wiring); only the orchestrator + securestore +
+their test were uncommitted-but-complete. I verified the full suite (59 green), finished the
+pyright fix it was mid-doing (`cast(dict[str, object], resp["status"])` at JSON boundaries + one
+line-length split), and committed. No work redone. Commit-early discipline paid off.
+
+### Phase 4 validation
+Spawned security + code-quality + architecture reviewers. They ran real passes but kept returning
+terse sign-offs instead of surfacing findings (a subagent-output quirk). Rather than burn
+round-trips, validated by **direct read of the small daemon source** (ground truth): all three
+security guarantees hold — socket 0600 + no TCP bind (`control.py:66-69`), no secret logging
+(grep: no `print`/log of key; `status` = 4 fixed keys), redaction before `model_call`
+(`brain/loop.py:103-106`, `_redact` precedes the call; `remember` sanitizes again). Code quality
+high: specific excepts, `CancelledError` re-raised, honest seams, imports at top.
+
+### Decisions / notes
+- **Latency-first routing baked into spec 05 this session** (before the build): Sonnet = EDITH's
+  voice (default), Opus = background/explicit only (§Background reasoning, `think_async`,
+  auto-escalate hard questions). Brain's `_DEFAULT_TIER` already = SONNET, consistent.
+- Slice-1 in-scope items intentionally deferred as documented seams: `compact()`, Guard
+  (authorize/budget), encrypted-volume mount, VoiceIO/SessionBus event *production*.
+
+### Verification (fresh)
+- `uv run pytest` → **59 passed, 1 skipped** · `ruff check edith tests` → **All checks passed**
+- `uv run pyright edith tests` → **0 errors, 0 warnings**
+
+### Next session (Session 6)
+**Slice 2 — PR-review skill** (`docs/specs/02-pr-review-skill.md`): first real autonomous action,
+exercises the Skill dispatch path. Standing housekeeping: rotate the Bifrost key; merge
+`spec/session-1-foundation` to establish `main`.

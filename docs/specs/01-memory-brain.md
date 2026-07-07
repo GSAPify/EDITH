@@ -773,3 +773,41 @@ live smoke via `--run-live` → **1 passed** (real Bifrost 200, non-empty text, 
 - Guard (`redact`/`authorize`/budget) not built — Brain's redaction is the interim; the autonomy
   gate + budget gate + `Router.budget_check`/opus escalation land with Guard.
 - Router two-call masking, streaming, tier-override heuristics, `supervised_reason` — Slice 5.
+
+---
+
+## Completion Record — edithd daemon + Control API — 2026-07-07 — **DONE** (Slice 1 core complete)
+
+> Built via `/autopilot` (Session 5), strict TDD. This closes the daemon side of Slice 1:
+> `edithd` now runs the full recall→reason→remember loop under a unix-socket Control API.
+> **59 tests + 1 live-skipped, ruff/pyright clean, 3-perspective validated.**
+
+**What shipped (`edith/daemon/`):**
+- `state.py` — `RuntimeState` machine (RUNNING/PAUSED/STOPPING); illegal transitions raise `ValueError`.
+- `control.py` — `asyncio.start_unix_server` (unix socket only, **never TCP**); JSON-lines; the four
+  locked commands; `status` returns exactly `{state, active_skill, budget_used, last_event}`; socket
+  file **0600**; stale-socket cleanup on start, removed on stop; fixed if/elif dispatch (no dynamic
+  attr → no injection); malformed-JSON / non-dict / unknown-cmd → structured errors; `budget_used`
+  via a `BudgetView` Protocol (`TODO(Guard)` stub returns 0).
+- `client.py` — one-shot unix-socket Control client (tests now; menu-bar later).
+- `edithd.py` — startup ordering (secrets via `keyring` + `.env` dev fallback → `SecureStore` 0700
+  dir → bus → Memory/Router/Brain register → Control API → RUNNING); graceful shutdown (drain,
+  defensive `compact()` if present, close store, remove socket); **pause wired into Brain**.
+- `securestore.py` — `SecureStore` Protocol + `LocalSecureStore` (0700 dir, explicit `chmod`);
+  encrypted-APFS mount is an honest `TODO(encrypted-volume)` seam (no fake mount, holds no key).
+- `deploy/com.gsapify.edithd.plist` — launchd template (RunAtLoad/KeepAlive); **NOT auto-loaded**.
+- **Brain pause wiring** (`brain/loop.py`) — `is_paused` predicate; paused ⇒ skips model_call AND
+  remember (privacy-respecting per §"Pause + Memory"); RAM buffer retained.
+
+**Verification (fresh, run by orchestrator):** `pytest` → 59 passed, 1 skipped · `ruff check
+edith tests` → clean · `pyright edith tests` → 0 errors. Security guarantees confirmed by direct
+source read: socket 0600 + no TCP bind, no secret logging, redaction before `model_call`.
+
+**Deviations / notes:** keyring has a `.env` dev fallback (spec-sanctioned dev path); encrypted
+volume stubbed behind `SecureStore` (real `hdiutil` mount = its own later work); `budget_used`
+stubbed 0 pending Guard. Build agent stalled at the finish (watchdog); recovered from atomic
+commits with no rework.
+
+**Still deferred (their own slices, not blockers):** `compact()` (Session/Conversation tables +
+working-context buffer), Guard (authorize/budget), encrypted-volume mount, VoiceIO/SessionBus
+event production. **Next: Slice 2 — PR-review skill.**

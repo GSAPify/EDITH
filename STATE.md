@@ -3,16 +3,16 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** BUILDING → Slice 1 (Memory + Brain)
-**Active slice:** 1 — Memory + Brain (Memory store + bus + Router + Brain loop shipped; edithd daemon next)
-**Last session:** 2026-07-06 — Session 4 (Slice 1 bus + Router/Bifrost adapter + Brain loop, strict TDD)
+**Current phase:** BUILDING → Slice 1 core COMPLETE (daemon shipped); ready for Slice 2
+**Active slice:** 1 — Memory + Brain (all core components + edithd daemon shipped & validated)
+**Last session:** 2026-07-07 — Session 5 (edithd daemon + Control API, autopilot; TDD + 3-reviewer validation)
 
 ## Slice status
 
 | # | Slice | Spec | Build | Notes |
 |---|-------|------|-------|-------|
 | 0 | North-star architecture | ✅ done | — | Authoritative doc |
-| 1 | Memory + Brain | ✅ done | 🚧 in progress | Memory store + **bus** (async pub/sub) + **Router** (Bifrost adapter, tenacity retries, live-smoke green) + **Brain loop** (recall→assemble→redact→model_call→remember→publish, passthrough) all green (29 tests + 1 live-skipped). Next: **edithd daemon + Control API**; then `compact()` + Guard. |
+| 1 | Memory + Brain | ✅ done | ✅ core done | Memory (Kuzu graph + sqlite-vec) + **bus** + **Router** (Bifrost, live-smoke green) + **Brain loop** + **edithd daemon** (unix-socket Control API pause/resume/kill/status, 0600, startup/shutdown ordering, pause-suspends-Memory, launchd plist template) — **59 tests + 1 live-skipped, ruff/pyright clean, 3-reviewer validated**. Documented seams left for their slices: `compact()`, Guard (budget/authorize), encrypted-volume mount, VoiceIO/SessionBus wiring. |
 | 2 | PR-review skill | ✅ done | ⬜ not started | Confirm-gate before GitHub review submit |
 | 3 | Voice | ✅ done | ⬜ not started | ElevenLabs primary, local fallback; wake+STT local |
 | 4 | Session awareness | ✅ done | ⬜ not started | Highest uncertainty — spec mandates a spike first |
@@ -23,15 +23,19 @@ Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
 ## Next action
 
-**Session 5 → continue Slice 1: `edithd` daemon lifecycle + Control API.** Bus, Router
-(Bifrost adapter, live-smoke-verified) and the Brain loop passthrough are all green
-(`edith/bus/`, `edith/router/`, `edith/brain/` — 29 tests + 1 live-skipped). Next concrete
-step: build **`edithd`** — process bring-up (Keychain secrets → mount encrypted volume → open
-Kuzu → bus → subsystems → Control API server), the unix-socket Control API
-(`pause`/`resume`/`kill`/`status`, locked shape), the pause-suspends-Memory decision, and the
-launchd plist. Then `compact()` (needs Session/Conversation node tables + a token-counted
-working-context buffer) and **Guard** (`redact`/`authorize`/budget — Brain currently redacts
-inline as the interim). Router two-call masking / streaming / tier heuristics = Slice 5.
+**Slice 1 core is COMPLETE** (`edith/{memory,bus,router,brain,daemon}/` — 59 tests + 1
+live-skipped, ruff/pyright clean, security/code/architecture reviewed). The daemon runs the full
+recall→reason→remember loop under a unix-socket Control API.
+
+**Session 6 → start Slice 2 (PR-review skill)** — read `docs/specs/02-pr-review-skill.md`. It's
+the first real autonomous action and exercises the Skill dispatch path end-to-end.
+
+**Deferred Slice-1 seams** (pick up when their slice needs them, not blocking Slice 2):
+`compact()` (needs Session/Conversation node tables + token-counted working buffer); **Guard**
+(`authorize`/budget — Brain redacts inline as the interim; `budget_used=0` stub in Control API);
+encrypted-volume mount (LocalSecureStore enforces 0700 dev dir); VoiceIO/SessionBus wiring
+(Brain already subscribes to their bus topics). Router two-call masking / `think_async` /
+tier heuristics = Slice 5.
 
 ## Blockers / needs from owner
 
