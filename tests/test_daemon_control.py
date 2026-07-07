@@ -19,6 +19,7 @@ import stat
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -69,7 +70,7 @@ async def test_status_returns_locked_shape(sock_path):
         await server.stop()
 
     assert resp["ok"] is True
-    status = resp["status"]
+    status = cast(dict[str, object], resp["status"])
     # LOCKED shape — exact key set, nothing more, nothing less.
     assert set(status) == {"state", "active_skill", "budget_used", "last_event"}
     assert status["state"] == "running"
@@ -84,7 +85,7 @@ async def test_pause_then_status_shows_paused(sock_path):
     try:
         client = ControlClient(sock)
         pause_resp = await client.send({"cmd": "pause"})
-        status = (await client.send({"cmd": "status"}))["status"]
+        status = cast(dict[str, object], (await client.send({"cmd": "status"}))["status"])
     finally:
         await server.stop()
 
@@ -99,7 +100,7 @@ async def test_resume_returns_to_running(sock_path):
         client = ControlClient(sock)
         await client.send({"cmd": "pause"})
         await client.send({"cmd": "resume"})
-        status = (await client.send({"cmd": "status"}))["status"]
+        status = cast(dict[str, object], (await client.send({"cmd": "status"}))["status"])
     finally:
         await server.stop()
 
@@ -176,7 +177,8 @@ async def test_concurrent_clients_share_one_state(sock_path):
     try:
         await ControlClient(sock).send({"cmd": "pause"})
         # a fresh connection sees the pause the first connection caused
-        status = (await ControlClient(sock).send({"cmd": "status"}))["status"]
+        reply = await ControlClient(sock).send({"cmd": "status"})
+        status = cast(dict[str, object], reply["status"])
     finally:
         await server.stop()
 
@@ -196,7 +198,8 @@ async def test_budget_view_is_the_seam(sock_path):
     )
     await server.start()
     try:
-        status = (await ControlClient(sock).send({"cmd": "status"}))["status"]
+        reply = await ControlClient(sock).send({"cmd": "status"})
+        status = cast(dict[str, object], reply["status"])
     finally:
         await server.stop()
 
