@@ -4,11 +4,15 @@
 natural-language query by fusing TWO signals over the ingested Memory graph:
 
 - **semantic** — ``store.semantic_recall(query)`` (sqlite-vec KNN over Fact
-  embeddings) when the store carries vectors. Degrades to empty when the live
-  graph was written by a plain ``MemoryStore`` (ingest currently does — see
-  spec 09 §Open questions), so the graph signal below always carries the result.
+  embeddings) when the store carries vectors. Ingest now writes through
+  ``VectorMemoryStore`` so ingested Facts ARE embedded; older graph-only Facts
+  are backfilled via ``VectorMemoryStore.backfill_embeddings`` (``--reembed``).
+  Still degrades to empty on a truly vector-less store, so the graph signal
+  below always carries the result.
 - **graph** — ``store.recall(query)`` (case-insensitive substring scan + 1-hop
   traversal), which matches Repo names/summaries and related Facts directly.
+  When BOTH signals are empty on a populated graph (e.g. a multi-word query with
+  no verbatim substring), a per-token text fallback keeps a result surfacing.
 
 Candidate Facts (and directly-matched Repos) are walked along ``relates_to``
 edges to their Repo nodes using the store's ``graph_snapshot`` (which already
@@ -119,6 +123,14 @@ def find_repos(query: str, store: StoreLike, k: int = 5) -> list[RepoHit]:
             for repo_id in fact_to_repos.get(node_id, []):
                 scores[repo_id] = scores.get(repo_id, 0.0) + 0.5
 
+    # Graceful degradation: ``store.recall`` scans the WHOLE query as one
+    # substring, so a multi-word NL query ("seo tools") silently misses a
+    # populated graph where the tokens appear separately. When nothing matched
+    # (no vectors AND no verbatim substring), fall back to a per-token text
+    # match so a populated graph never returns nothing.
+    if not scores:
+        _token_fallback(query, nodes, repo_by_id, fact_to_repos, scores)
+
     ranked: list[RepoHit] = []
     for repo_id, score in scores.items():
         node = repo_by_id[repo_id]
@@ -135,6 +147,42 @@ def find_repos(query: str, store: StoreLike, k: int = 5) -> list[RepoHit]:
 
     ranked.sort(key=lambda h: (h.score, h.name), reverse=True)
     return ranked[:k]
+
+
+def _token_fallback(
+    query: str,
+    nodes: list[dict[str, Any]],
+    repo_by_id: dict[str, dict[str, Any]],
+    fact_to_repos: dict[str, list[str]],
+    scores: dict[str, float],
+) -> None:
+    """Per-token text match over Repo name/summary + Fact.text into ``scores``.
+
+    The design-around for ``store.recall``'s whole-query substring scan: match
+    each query token independently, so a repo whose name/summary/related-Fact
+    shares any token still surfaces. Score is proportional to token overlap.
+    """
+    tokens = {t for t in query.lower().split() if len(t) > 2}
+    if not tokens:
+        return
+
+    def overlap(text: str) -> int:
+        blob = text.lower()
+        return sum(1 for t in tokens if t in blob)
+
+    for node in nodes:
+        node_id = str(node.get("id", ""))
+        node_type = str(node.get("type", ""))
+        if node_type == "Repo" and node_id in repo_by_id:
+            text = f"{node.get('name', '')} {node.get('summary', '')}"
+            hits = overlap(text)
+            if hits:
+                scores[node_id] = scores.get(node_id, 0.0) + hits
+        elif node_type == "Fact":
+            hits = overlap(str(node.get("text", "")))
+            if hits:
+                for repo_id in fact_to_repos.get(node_id, []):
+                    scores[repo_id] = scores.get(repo_id, 0.0) + 0.5 * hits
 
 
 async def summarize_hits(query: str, hits: list[RepoHit], router: RouterLike) -> str:

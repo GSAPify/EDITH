@@ -512,3 +512,58 @@ of new code/spec = NONE. Temp dir cleaned.
   semantic layer's job, which is dark on live data per the above).
 - Repo-name extraction in Brain is a deliberate thin `<name> repo` regex, NOT an NLP layer
   (spec-09 open question 2).
+
+---
+
+## Session 10 — 2026-07-07 — Close the ingest↔finder embedding gap (TDD)
+
+**Goal:** Fix the root cause of the NL finder returning "No repos matched" for every real query:
+ingest wrote Facts via the graph-only `MemoryStore`, so the 145 live Facts had NO embeddings in
+sqlite-vec; the finder's `semantic_recall` searched an EMPTY vector index. Two write/read paths
+disagreed. Three fixes, each test-first (watched RED → GREEN).
+
+### Fix 1 — Ingest must embed
+`run_ingest` now instantiates `VectorMemoryStore` (was `MemoryStore`) so every Fact is embedded
+into sqlite-vec on `remember`. `VectorMemoryStore` subclasses `MemoryStore`, so `build_graph`/
+`_existing_commit_dates`/`graph_snapshot` are unchanged — only the instantiation moved. Added an
+injectable `embedder: Embedder | None = None` param (testability seam, not an abstraction) so the
+suite shares one loaded ONNX model instead of reloading per non-dry test. Redaction is unchanged
+and still first: `VectorMemoryStore.remember` runs `sanitize_node` before `_upsert_vector` embeds,
+so the never-persist guarantee holds on the vector path too.
+- RED tests: `test_ingest_embeds_facts_into_vector_index` (semantic_recall over a freshly-ingested
+  store — failed with `unexpected keyword argument 'embedder'` then empty vectors on old path) and
+  `test_ingest_redacts_secret_before_embedding` (planted `sk-proj-…` absent from `fact_map.text`).
+
+### Fix 2 — Backfill the live graph WITHOUT model calls
+`VectorMemoryStore.backfill_embeddings()` reads every `Fact` from the Kuzu graph and embeds those
+missing from `fact_map`, using the LOCAL fastembed embedder only — NO Bifrost/model calls.
+Idempotent (skips Facts already embedded, returns count inserted). `sanitize_text` runs first on
+each text (defence-in-depth). New CLI branch `python -m edith.ingest --reembed [--data-dir PATH]`
+is credential-free — it does NOT hit the `BIFROST_*` gate that the normal ingest path enforces.
+- RED test: `test_backfill_embeds_graph_only_facts_idempotently` — seed graph-only via plain
+  `MemoryStore`, assert `semantic_recall == []`, backfill embeds 1, recall finds it, second
+  backfill returns 0.
+
+### Fix 3 — Finder degrades gracefully
+`store.recall` scans the WHOLE query as one substring, so a multi-word NL query ("seo tools")
+silently returns nothing on a populated graph even though the individual tokens match. `find_repos`
+now runs a per-token text fallback over Repo name/summary + `Fact.text` — but ONLY when both the
+semantic and verbatim-substring signals produced zero scores. Every existing passing case
+(`test_graph_only_fallback` uses "seller approval", a verbatim substring) is unchanged.
+- RED test: `test_graph_token_fallback_when_no_verbatim_substring` — graph-only store, query
+  "seo tools" (tokens match, phrase doesn't) → `[]` before, repo returned after.
+
+### Verification
+114 tests green (was 110) + 1 live-skipped. `ruff check edith tests` clean. `pyright edith` 0 errors.
+Live backfill: `python -m edith.ingest --reembed --data-dir ~/.edith/data` → `reembedded 145
+Fact(s)`; sqlite-vec now holds 145 fact_map + 145 fact_vectors rows, secret-scan of `fact_map` = 0.
+Live finder (previously "No repos matched"): `python -m edith.finder "seo tools" --data-dir
+~/.edith/data` now ranks `seo-tools` (the real SEO repo) #2 behind `skills`, with semantic
+neighbours; `"which repo handles PR reviews"` returns `skills`, `pi-toolsmith`, `concorde_lib`, etc.
+
+### Known limitation (documented, NOT fixed here)
+**Kuzu embedded is single-process.** The viewer, finder, and ingest each open `memory.kuzu`
+directly and contend on the on-disk file lock — only one may hold it at a time. Running
+`--reembed` requires no other EDITH process holding the DB (checked `lsof` before the live run).
+The production fix is routing ALL DB access through `edithd` (one owner of the handle, everyone
+else over the Control API). Noted as a follow-up; out of scope for this PR (one root cause per PR).

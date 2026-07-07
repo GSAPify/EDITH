@@ -102,6 +102,31 @@ def test_graph_only_fallback_when_no_vectors(tmp_path: Path) -> None:
     assert hits[0].name == "approvals"
 
 
+def test_graph_token_fallback_when_no_verbatim_substring(tmp_path: Path) -> None:
+    """Fix 3: a multi-word NL query whose tokens appear in the graph but NOT as a
+    verbatim phrase must still return the repo, via a per-token graph fallback.
+    ``store.recall`` scans the whole query as one substring, so "seo tools"
+    misses even though "seo" and "tools" each match — RED before the fallback."""
+    from edith.memory.store import MemoryStore
+
+    store = MemoryStore(tmp_path / "memory.kuzu")
+    try:
+        store.remember(
+            nodes=[
+                Node("Repo", "repo-seo", {"name": "seotron", "summary": "seo tooling"}),
+                Node("Fact", "fact-s",
+                     {"text": "seotron provides tools for keyword research", "source": "readme"}),
+            ],
+            edges=[Edge("relates_to", "Fact", "fact-s", "Repo", "repo-seo")],
+        )
+        # No verbatim "seo tools" substring anywhere; tokens "seo"+"tools" do match.
+        hits = find_repos("seo tools", store, k=5)
+    finally:
+        store.close()
+    assert hits, "token fallback must return the repo when no verbatim phrase matches"
+    assert hits[0].name == "seotron"
+
+
 async def test_summarize_hits_uses_sonnet(tmp_path: Path) -> None:
     router = FakeRouter()
     hits = [

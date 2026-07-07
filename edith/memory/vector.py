@@ -34,6 +34,7 @@ from pathlib import Path
 import sqlite_vec
 
 from edith.memory.embeddings import Embedder, LocalEmbedder
+from edith.memory.secrets import sanitize_text
 from edith.memory.store import Edge, MemoryStore, Node, sanitize_node
 
 
@@ -139,6 +140,35 @@ class VectorMemoryStore(MemoryStore):
         Retained so callers written against the previous build-once Kuzu impl
         keep working; the moment a Fact is remembered it is searchable.
         """
+
+    def backfill_embeddings(self) -> int:
+        """Embed existing graph ``Fact`` nodes that have no vector row yet.
+
+        Backfills a store that was written graph-only (e.g. by a plain
+        ``MemoryStore``): reads every ``Fact`` from the Kuzu graph and inserts
+        its embedding into sqlite-vec using the LOCAL embedder — NO model /
+        Bifrost calls. Idempotent: Facts already in ``fact_map`` are skipped, so
+        re-running embeds nothing new. Returns the number of Facts embedded.
+
+        Sanitize runs FIRST on each text (defence-in-depth: the never-persist
+        guarantee holds on the backfill path too), so no credential is embedded.
+        """
+        embedded = 0
+        try:
+            for fact_id, text in self._rows("MATCH (f:Fact) RETURN f.id, f.text"):
+                fid = str(fact_id)
+                row = self._vec.execute(
+                    "SELECT 1 FROM fact_map WHERE fact_id = ?", (fid,)
+                ).fetchone()
+                if row is not None:
+                    continue  # already embedded — idempotent skip
+                self._upsert_vector(fid, sanitize_text(str(text or "")))
+                embedded += 1
+            self._vec.commit()
+        except sqlite3.Error:
+            self._vec.rollback()
+            raise
+        return embedded
 
     def semantic_recall(self, query: str, k: int = 5) -> list[dict[str, object]]:
         """Top-k Facts by cosine-ish (L2) distance to ``query``, via sqlite-vec KNN."""

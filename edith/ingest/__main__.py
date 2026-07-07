@@ -18,6 +18,7 @@ import sys
 import httpx
 
 from edith.ingest.pipeline import run_ingest
+from edith.memory.vector import VectorMemoryStore
 from edith.router import Router, Tier
 
 _DEFAULT_DATA_DIR = "~/.edith/data"
@@ -29,6 +30,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repos", nargs="*", default=None, help="only ingest these repo names")
     p.add_argument("--limit", type=int, default=None, help="cap number of repos")
     p.add_argument("--dry-run", action="store_true", help="no model calls, no writes")
+    p.add_argument(
+        "--reembed", action="store_true",
+        help="backfill embeddings for existing graph Facts (local embedder, no model calls)",
+    )
     p.add_argument("--data-dir", default=os.environ.get("EDITH_DATA_DIR", _DEFAULT_DATA_DIR))
     p.add_argument("--scan-root", default=_DEFAULT_SCAN_ROOT)
     p.add_argument("--max-tokens", type=int, default=512, help="Opus deep-extract cap")
@@ -43,7 +48,22 @@ def _models() -> dict[Tier, str]:
     }
 
 
+def _reembed(data_dir: str) -> int:
+    """Backfill embeddings for the live graph, purely local (no Bifrost)."""
+    expanded = os.path.expanduser(data_dir)
+    store = VectorMemoryStore(os.path.join(expanded, "memory.kuzu"))
+    try:
+        count = store.backfill_embeddings()
+    finally:
+        store.close()
+    print(f"reembedded {count} Fact(s) into sqlite-vec at {expanded}")
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
+    if args.reembed:
+        return _reembed(args.data_dir)
+
     if args.dry_run:
         report = await run_ingest(
             scan_root=args.scan_root,

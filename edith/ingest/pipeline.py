@@ -26,8 +26,10 @@ from edith.ingest.extract import Extraction, RouterLike, extract_repo
 from edith.ingest.fetch import GhMetadata, fetch_repo_docs
 from edith.ingest.graph_map import build_graph
 from edith.ingest.redact import redact_docs
+from edith.memory.embeddings import Embedder
 from edith.memory.secrets import sanitize_text
 from edith.memory.store import Edge, MemoryStore, Node
+from edith.memory.vector import VectorMemoryStore
 
 _DEFAULT_SCAN_ROOT = "~/gitstuff"
 _DEFAULT_CONCURRENCY = 4
@@ -102,8 +104,14 @@ async def run_ingest(
     concurrency: int = _DEFAULT_CONCURRENCY,
     deep_max_tokens: int = _DEFAULT_DEEP_MAX_TOKENS,
     include_global: bool = True,
+    embedder: Embedder | None = None,
 ) -> IngestReport:
-    """Run the ingestion pipeline once and return the status report."""
+    """Run the ingestion pipeline once and return the status report.
+
+    Writes through ``VectorMemoryStore`` so every Fact is embedded into
+    sqlite-vec on ``remember`` (the finder's semantic recall reads that index).
+    ``embedder`` is an injectable seam so tests can share one loaded model.
+    """
     targets = discover_repos(scan_root)
     if repos:
         wanted = set(repos)
@@ -118,7 +126,7 @@ async def run_ingest(
     if not dry_run:
         db_path = Path(data_dir).expanduser() / "memory.kuzu"
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        store = MemoryStore(db_path)
+        store = VectorMemoryStore(db_path, embedder=embedder)
         existing = _existing_commit_dates(store)
 
     try:
