@@ -27,3 +27,22 @@ def test_sanitize_redacts_the_secret_value_not_the_fact():
     out = sanitize_text(line)
     assert "GOCSPX-EXAMPLE_FAKE_SECRET_DO_NOT_STORE" not in out
     assert "[REDACTED]" in out
+
+
+def test_markdown_wrapped_assignment_redacts_the_value_not_the_wrapper():
+    """A markdown-bold `**key:** value` must redact the VALUE, not just the `**`.
+
+    Regression: `[:=]\\s*(\\S+)` used to capture the `**` right after the colon,
+    leaving the real value in the clear. Uses only FAKE tokens.
+    """
+    line = "- **refresh_token:** 1//0gFAKErefreshTokenValueThatIsLong"
+    out = sanitize_text(line)
+    assert "1//0gFAKErefreshTokenValueThatIsLong" not in out
+    assert "[REDACTED]" in out
+
+
+def test_google_refresh_token_prefix_is_a_shape_backstop():
+    assert contains_secret("1//0gFAKErefreshTokenValueThatIsLong")
+    assert "1//0gFAKErefreshTokenValueThatIsLong" not in sanitize_text(
+        "some prose 1//0gFAKErefreshTokenValueThatIsLong more prose"
+    )

@@ -17,16 +17,22 @@ import re
 _REDACTED = "[REDACTED]"
 
 # key/secret/token/password assignments: `name: value` or `name = value`.
+# The value capture first skips any markdown/quote wrapper punctuation
+# (``**``, backticks, quotes) between the delimiter and the value, so a
+# ``- **refresh_token:** <value>`` line redacts the VALUE, not just the ``**``.
 _ASSIGNMENT = re.compile(
     r"(?i)\b([\w.-]*(?:secret|token|password|passwd|api[_-]?key|client[_-]?secret|"
-    r"private[_-]?key|access[_-]?key|refresh[_-]?token))\b\s*[:=]\s*(\S+)"
+    r"private[_-]?key|access[_-]?key|refresh[_-]?token))\b\s*[:=]\s*[*`'\"]*\s*(\S+)"
 )
 
 # PEM / private-key block headers.
 _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 
-# Provider-shaped token prefixes (Google OAuth, OpenAI-style, GitHub PATs).
-_TOKEN_PREFIX = re.compile(r"\b(?:GOCSPX-|sk-[A-Za-z0-9-]+|ghp_|github_pat_)\S+")
+# Provider-shaped token prefixes (Google OAuth client secret + refresh token,
+# OpenAI-style, GitHub PATs). The ``1//`` shape is Google's OAuth refresh token.
+_TOKEN_PREFIX = re.compile(
+    r"\b(?:GOCSPX-|sk-[A-Za-z0-9-]+|ghp_|github_pat_)\S+|1//[A-Za-z0-9_-]{10,}"
+)
 
 
 def contains_secret(text: str) -> bool:
