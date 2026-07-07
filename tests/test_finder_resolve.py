@@ -177,3 +177,30 @@ def test_resolve_result_is_awaitable_friendly() -> None:
     result = ResolveResult(status=ResolveStatus.NOT_FOUND, name="x", answer="", background=None)
     assert result.background is None
     assert not asyncio.iscoroutine(result.background)
+
+
+def test_gh_readme_uses_raw_accept_and_no_jq(monkeypatch) -> None:  # noqa: ANN001
+    """Regression: the raw-content Accept header returns README markdown on
+    stdout, so ``--jq`` must NOT be used (jq would try to parse markdown as JSON
+    and fail — that made every gh-path resolve NOT_FOUND). Lock the arg shape and
+    that stdout is returned verbatim."""
+    from edith.finder import resolve as resolve_mod
+
+    captured: dict[str, object] = {}
+
+    class _Result:
+        stdout = "# README\n\nadczar analytics."
+
+    def fake_run(args, **kwargs):  # noqa: ANN001, ANN003
+        captured["args"] = args
+        return _Result()
+
+    monkeypatch.setattr(resolve_mod.subprocess, "run", fake_run)
+
+    readme = resolve_mod._gh_readme("adczar")
+
+    args = captured["args"]
+    assert "--jq" not in args  # the bug: --jq on a raw (non-JSON) response
+    assert "Accept: application/vnd.github.raw+json" in args
+    assert "repos/patterninc/adczar/readme" in args
+    assert readme == "# README\n\nadczar analytics."  # stdout returned verbatim

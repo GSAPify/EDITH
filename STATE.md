@@ -3,9 +3,12 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** BUILDING → Slice 1 core + Memory Viewer + Repo Ingestion + NL Finder shipped
-**Active slice:** 1 — Memory + Brain (+ repo-ingestion pipeline + NL finder over the live graph)
-**Last session:** 2026-07-07 — Session 10 (closed the ingest↔finder embedding gap, TDD). Ingest now writes via `VectorMemoryStore` so Facts are embedded on `remember` (Fix 1, `run_ingest(embedder=…)` seam); `VectorMemoryStore.backfill_embeddings()` + `python -m edith.ingest --reembed` embed existing graph-only Facts with the LOCAL embedder, no model calls, idempotent, credential-free (Fix 2); `find_repos` adds a per-token graph fallback that fires ONLY when both signals score zero, so a populated graph never silently returns nothing (Fix 3). 114 tests green, ruff/pyright clean. Live: `--reembed` embedded the 145 real Facts; `python -m edith.finder "seo tools"` now returns real repos (was "No repos matched"). Known limitation documented: Kuzu embedded is single-process (lock contention across viewer/finder/ingest; prod fix = route all DB access through `edithd`).
+**Current phase:** Slice 1 + Viewer + Ingest + NL Finder + **Slice 2 (PR-review)** DONE. Ready for Slice 3 (Voice).
+**Active slice:** → next is **Slice 3 (Voice)**. Slice 2 built + verified + live-smoked on branch `build/slice-2-pr-review` (uncommitted → committed this session; ready to push + PR).
+**Repo:** everything is on **`master`** (renamed from `main`, Session 11). All feature branches merged
++ deleted; `master` is the GitHub default. New work = branch off `master`, PR in. Full graph LIVE in
+`~/.edith/data/memory.kuzu` (206 nodes: 23 Repo, 26 Person, 12 Project, 145 Fact — embedded, no leak).
+**Prev session:** 2026-07-07 — Session 12 (built Slice 2 PR-review skill, TDD, delegated to Opus executor then verified independently + live-smoked). Added the Skill contract + Brain trigger-dispatch registry (didn't exist before — Brain went straight to model), `PRReviewSkill` 7-step flow, injectable async `gh` runner, and `Person.gh_handle` via a guarded non-destructive migration. Confirm-gate is the crux and is proven unreachable-on-deny by both a non-vacuous test and a live smoke (real gh + real Opus on `patterninc/agents#2423` → real review, `posted=False`, zero `pr review` writes). 130 tests + 1 skipped, ruff/pyright clean. Session 10 (prior): closed the ingest↔finder embedding gap, TDD. Ingest now writes via `VectorMemoryStore` so Facts are embedded on `remember` (Fix 1, `run_ingest(embedder=…)` seam); `VectorMemoryStore.backfill_embeddings()` + `python -m edith.ingest --reembed` embed existing graph-only Facts with the LOCAL embedder, no model calls, idempotent, credential-free (Fix 2); `find_repos` adds a per-token graph fallback that fires ONLY when both signals score zero, so a populated graph never silently returns nothing (Fix 3). 114 tests green, ruff/pyright clean. Live: `--reembed` embedded the 145 real Facts; `python -m edith.finder "seo tools"` now returns real repos (was "No repos matched"). Known limitation documented: Kuzu embedded is single-process (lock contention across viewer/finder/ingest; prod fix = route all DB access through `edithd`).
 
 ## Slice status
 
@@ -13,7 +16,7 @@
 |---|-------|------|-------|-------|
 | 0 | North-star architecture | ✅ done | — | Authoritative doc |
 | 1 | Memory + Brain | ✅ done | ✅ core done | Memory (Kuzu graph + sqlite-vec) + **bus** + **Router** (Bifrost, live-smoke green) + **Brain loop** + **edithd daemon** (unix-socket Control API pause/resume/kill/status, 0600, startup/shutdown ordering, pause-suspends-Memory, launchd plist template) — **59 tests + 1 live-skipped, ruff/pyright clean, 3-reviewer validated**. Documented seams left for their slices: `compact()`, Guard (budget/authorize), encrypted-volume mount, VoiceIO/SessionBus wiring. |
-| 2 | PR-review skill | ✅ done | ⬜ not started | Confirm-gate before GitHub review submit |
+| 2 | PR-review skill | ✅ done | ✅ done | `edith/skills/` (Skill contract + `gh` runner + `PRReviewSkill`) + Brain trigger-dispatch + `Person.gh_handle` (guarded migration) + **registered in edithd's Brain** (`skills=[PRReviewSkill(router)]`; default `_silent`/`_deny` → dispatches but never posts until Slice 3 voice). Confirm-gate is the crux: `gh pr review` unreachable unless `confirm()==True`, default DENY. Diff redacted (known shapes) before Opus. **131 tests + 1 skipped, ruff/pyright clean.** LIVE-smoked: real gh + real Opus on `patterninc/agents#2423`, confirm=deny → real review, `posted=False`, zero `pr review` writes. **Known gap (verified live):** resolution against the real graph currently ALWAYS asks (ingested Persons have `gh_handle=""`; recall surfaces no Repo for a person name) — safe ask-when-unsure path; "instant HIT next time" is only partial. Diff-size cost gate NOT wired. See spec 02 §Follow-ups. |
 | 3 | Voice | ✅ done | ⬜ not started | ElevenLabs primary, local fallback; wake+STT local |
 | 4 | Session awareness | ✅ done | ⬜ not started | Highest uncertainty — spec mandates a spike first |
 | 5 | Router | ✅ done | ⬜ not started | Two-call latency masking (orchestration, not one inference) |
@@ -24,25 +27,46 @@
 
 Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
+> **Session 12 addendum — realtime resolve-on-miss now live in the daemon.** `edithd` wires
+> `resolve_repo` into Brain (`_make_default_resolver` binds store+router for a real `MemoryStore`;
+> injectable seam otherwise). Fixed a latent bug in `finder/resolve._gh_readme` (`--jq .content`
+> combined with the `raw+json` Accept header → parsed markdown as JSON → every gh-path resolve was
+> a spurious NOT_FOUND; only local-clone resolves ever worked). **Behavior now:** ask EDITH about a
+> repo it doesn't know → live fetch + Sonnet answer NOW + background Opus deep-extract →
+> `map_and_remember` **auto-adds it to the graph** → next mention is an instant HIT. Live-proven on
+> `adczar` (graph 0→1 repos, accurate answer). 135 tests + 1 skipped, ruff/pyright clean.
+
 ## Next action
 
-**Slice 1 core is COMPLETE** (`edith/{memory,bus,router,brain,daemon}/` — 59 tests + 1
-live-skipped, ruff/pyright clean, security/code/architecture reviewed). The daemon runs the full
-recall→reason→remember loop under a unix-socket Control API.
+### ▶ SLICE 3 — Voice (START HERE)
+Slice 2 is done, verified, and live-smoked (see the Completion Record in `docs/specs/02-pr-review-skill.md`).
+Next is **Slice 3 (Voice)** — read `docs/specs/03-voice.md`. ElevenLabs primary + local neural fallback
+for TTS; local wake-word + STT. The bus seams already exist: Brain publishes `brain.decision` and
+skills call an injected `speak()` (currently `_silent` no-op in `edith/skills/pr_review.py`) — Slice 3
+wires a real VoiceIO to those. The confirm gate is where voice pays off: the Slice-2 `confirm` callable
+(default `_deny`) becomes a spoken "Should I post this review?" → owner voice/keyword → True/False.
 
-**Session 6 shipped the Memory Viewer** (`docs/specs/07-memory-viewer.md`): `python -m
-edith.viewer --demo` renders a dense force-directed cloud offline; live mode reads
-`EDITH_DATA_DIR/memory.kuzu`. Schema gained `PR` + `authored_by`/`reviewed_by` (additive).
+**Reuse, don't rebuild:** `edith/router` (Tier.HAIKU for cheap TTS-prep/acks), `edith/skills`
+(inject a real `speak`/`confirm` in place of the `_silent`/`_deny` defaults), `edith/brain` (already
+subscribes to voice bus topics; `voice.utterance` is its input event), `edith/daemon` (VoiceIO/SessionBus
+wiring seam noted in edithd).
 
-**Session 8 shipped Repo Ingestion** (`docs/specs/08-repo-ingest.md`): `edith/ingest/` feeds the
-live graph the viewer renders. **Orchestrator next:** review, then trigger the full
-contributed-repos run — `python -m edith.ingest` (env BIFROST_*), no `--repos` cap, into the real
-`EDITH_DATA_DIR`. NOTE the schema-migration open question if a live `memory.kuzu` already exists
-(none does yet — fresh creation is clean). While there, the `secrets.py` markdown-wrapper fix
-(Session 8) also hardens Brain/remember for every future ingest.
+**Gotchas the orchestrator MUST heed (still true):**
+- Delegated agents return a terse "Complete." — **verify independently + do a LIVE run.** Tests
+  green ≠ works (the ingest→finder embed bug passed 110 tests but returned nothing live; Slice 2's
+  agent even ended with a confused "send me the port" message — the code was fine, but only reading
+  the source + a live smoke proved it).
+- **Kuzu is single-process** → stop the viewer (`lsof -ti tcp:8765 | xargs kill`) before running
+  anything that opens `memory.kuzu` (hit this again in Slice 2's migration check).
+- Bifrost creds are in gitignored `.env` (source it: `set -a; source .env; set +a`). **KEY STILL
+  NEEDS ROTATING** (pasted in chat 2026-07-06).
+- The owner's Pattern commit identity ≠ GSAPify (author filters unreliable) → resolve people via
+  the graph + `gh pr list`, not `--author=GSAPify`.
 
-**Then → start Slice 2 (PR-review skill)** — read `docs/specs/02-pr-review-skill.md`. First real
-autonomous action; exercises the Skill dispatch path end-to-end.
+**Slice-2 seam for Slice 3 to grab:** `PRReviewSkill(router, *, gh, confirm, speak, org)` — `confirm`
+and `speak` are injected; the daemon wires the real voice ones. `Person.gh_handle` now exists (guarded
+migration in `MemoryStore._migrate_person_gh_handle`). Skill dispatch is `Brain(skills=[...])`; empty
+registry = pre-skill behavior.
 
 **Deferred Slice-1 seams** (pick up when their slice needs them, not blocking Slice 2):
 `compact()` (needs Session/Conversation node tables + token-counted working buffer); **Guard**
@@ -60,7 +84,8 @@ tier heuristics = Slice 5.
 - ~~Bifrost `base_url` + API key (for Slice 1 Brain + Slice 5 Router).~~ **RESOLVED (Session 4):**
   in the gitignored `.env`; Router live smoke hit real Bifrost (200, non-empty). Key was pasted
   in chat 2026-07-06 → **rotate it in Bifrost** (noted in `.env`). Keychain retrieval = daemon work.
-- Decision to merge `spec/session-1-foundation` → establish `main` on GitHub.
+- ~~Establish `main` on GitHub.~~ **DONE (Session 11):** all branches consolidated into **`master`**
+  (renamed from `main`), set as default, redundant branches deleted. Single-branch repo now.
 
 ## Known limitations
 

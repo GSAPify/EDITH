@@ -567,3 +567,110 @@ directly and contend on the on-disk file lock — only one may hold it at a time
 `--reembed` requires no other EDITH process holding the DB (checked `lsof` before the live run).
 The production fix is routing ALL DB access through `edithd` (one owner of the handle, everyone
 else over the Control API). Noted as a follow-up; out of scope for this PR (one root cause per PR).
+
+---
+
+## Session 11 — 2026-07-07 — Repo consolidation → `master`; Slice-2 handoff
+
+No code. Housekeeping + kickoff before a context compaction.
+- **Consolidated to one branch.** ff'd `main` to include the NL-finder commits, renamed `main`→**`master`**,
+  pushed `master` (allowed — pushed *before* it was the default, so never a direct push to the live
+  default), set it as the GitHub default, then deleted the 6 redundant branches (old `main`,
+  `spec/session-1-foundation`, `build/slice-1-memory-brain`, `build/memory-viewer`, `build/repo-ingest`,
+  `build/nl-finder`). Repo is now single-branch (`master`).
+- **Live graph confirmed:** `~/.edith/data/memory.kuzu` = 206 nodes (23 Repo · 26 Person · 12 Project ·
+  145 Fact, embedded), secret-scan clean. Viewer serves it at `:8765`.
+- **Next: Slice 2 (PR-review)** on `build/slice-2-pr-review` (cut off `master`). Full kickoff brief +
+  gotchas are in `STATE.md` §"▶ SLICE 2". Standing item: **rotate the Bifrost key.**
+
+---
+
+## Session 12 — 2026-07-07 — Slice 2: PR-review skill (built + verified + live-smoked)
+
+Delegated the TDD build to an Opus executor with a strict brief, then verified independently
+(read every source file, ran the full suite, ran a live read-only smoke). Did NOT trust the
+agent's "Complete." — good thing, its final message was a confused "send me the port," but the
+code on disk was correct. Tests-green ≠ works stays the rule; live smoke is what proved it.
+
+**What shipped**
+- `edith/skills/base.py` — the `Skill` Protocol (`name`/`triggers`/`needs_confirmation`/`run`)
+  + `SkillContext` (utterance + memory) + `SkillResult`. This dispatch interface didn't exist;
+  the spec assumed it did. Brain went straight to the model before.
+- `edith/skills/gh.py` — injectable async `gh` runner (`asyncio.create_subprocess_exec`,
+  arg-lists only, never a shell string; `GhError` on nonzero exit). `GhRunner` type alias so
+  tests never touch GitHub.
+- `edith/skills/pr_review.py` — `PRReviewSkill`, the 7-step flow. All deps injected
+  (Router, gh, confirm, speak) → fully offline-testable.
+- `edith/brain/loop.py` — trigger-match dispatch registry (`Brain(skills=[...])`, default empty
+  = pre-skill behavior, mirroring the `resolve_repo=None` no-op pattern). First skill whose
+  trigger is a substring of the utterance owns the turn, publishes `skill.result`, short-circuits
+  the answer path.
+- `edith/memory/store.py` — `Person.gh_handle` added additively via a guarded `TABLE_INFO` →
+  `ALTER … ADD` migration (`_migrate_person_gh_handle`). No-op on fresh DBs, adds the column on
+  the live one. Needed to run `gh pr list --author <handle>` and to make Step-7 "faster next
+  time" real.
+
+**The crux — confirm gate.** `gh pr review` is the only GitHub-write call site and lives inside
+a single `if await self._confirm(...)` branch — unreachable unless confirm returns True. Default
+`_deny`. Proven two ways: `test_declined_never_posts` (confirm→False ⇒ recorded `pr review`
+calls == []) and the live smoke below. The diff is `sanitize_text`-redacted BEFORE the model
+message is assembled (`test_planted_secret_redacted_before_router`, non-vacuous).
+
+**Key decisions**
+- Confirm defaults to DENY (not a blocking prompt) — voice/interactive confirm is Slice 3/4;
+  honest Slice-2 behavior is "review, surface, remember, don't post."
+- Inline Opus review rubric rather than shelling out to OMC `/code-review` from `edithd` (heavier
+  integration; kept the slice shippable — noted as a follow-up).
+- No haiku *model* call for the ack; `speak()` fires the "reviewing now…" line directly (real
+  two-call latency-mask lands in Slice 5).
+
+**Verification**
+- 130 passed + 1 skipped (was 114+1; +16 new tests). `ruff check` clean. `pyright` 0 errors.
+- Migration verified non-destructive on the LIVE DB: 26 Person / 23 Repo / 145 Fact intact,
+  existing names preserved, `gh_handle` column present. (Had to `lsof -ti tcp:8765 | xargs kill`
+  the viewer first — Kuzu single-process lock, again.)
+- **LIVE smoke:** real `gh` + real Bifrost Opus on `patterninc/agents#2423` (kemenyc, +28/-2),
+  `confirm=deny`. Opus produced a genuine review that caught a real regression (kms moving from
+  always-on `PI_TOOLSMITH_SERVERS` to a toggle-gated loader breaks existing users). `posted=False`;
+  recorded gh calls were exactly `pr list` + `pr diff` — ZERO `pr review` writes.
+
+**Follow-ups:** OMC `/code-review` rubric reuse; Slack PR-discovery fallback + confirm Slack-MCP
+reachable from `edithd`; diff-size gate (>2000 lines ⇒ ASK before a big Opus call); review-style
+learning loop. Standing item: **rotate the Bifrost key.** Kuzu single-process lock unchanged.
+
+**Post-build advisor pass caught two real gaps (fixed / corrected):**
+1. **edithd didn't register the skill** — the dispatch registry I added to Brain was empty in
+   the actual product (daemon built `Brain(...)` with no `skills=`). Fixed: `edithd` now builds
+   `Brain(skills=[PRReviewSkill(self._router)])` with default `_silent`/`_deny` (dispatches +
+   surfaces via `skill.result`, never posts until Slice 3 voice). Added
+   `test_pr_review_skill_registered_and_dispatches` (bus `voice.utterance` → skill.result, no
+   model call). 131 tests now.
+2. **"Instant HIT next time" was overstated** — verified live on the 206-node DB:
+   `recall("Niraj Kale")` returns only the Person (0 Repo hits, `gh_handle=""`). So against the
+   real graph, resolution ALWAYS follows the designed ASK path (handle empty → ask handle; no
+   person→repo path in `recall` → ask repo). Step-7 remembers the handle but writes no person↔repo
+   edge, so repo resolution stays an ASK. Corrected the claim in the spec + STATE; logged the true
+   HIT as a follow-up. Same failure shape as the embed bug — the fake (FakeMemory returning 1
+   person + 1 repo) encoded an assumption the real component doesn't satisfy; only a live check
+   caught it. Also elevated the un-wired diff-size cost gate and the known-shapes-only redaction
+   from buried follow-ups to visible gaps.
+
+**Follow-up in the same PR — realtime repo lookup wired into the daemon + a real bug fixed.**
+Owner asked to make the always-on daemon actually do resolve-on-miss (and confirm that asking
+about a repo auto-adds it to the graph). Two things:
+1. **Wired `resolve_repo` into `edithd`** — `EdithDaemon(resolve_repo=...)` DI seam (default None),
+   plus `_make_default_resolver` that binds store+router when Memory is a concrete `MemoryStore`
+   (a fake in tests is not → stays None → existing tests unchanged). So the running daemon now
+   does live repo lookup out of the box. +3 tests (injected path, real-store default, fake→None).
+2. **Fixed a real bug in `finder/resolve._gh_readme`** — it passed `--jq .content` together with
+   the `raw+json` Accept header. The raw header returns README *markdown* on stdout (not JSON), so
+   `--jq` failed to parse the leading `#` → `CalledProcessError` → caught → `""` → every gh-path
+   resolve was a spurious NOT_FOUND. The Session-10 smoke only passed because `agentsmith` was a
+   LOCAL clone; the gh path had never actually worked. Fix: drop `--jq`, return stdout verbatim.
+   Regression test locks the arg shape (no `--jq`, raw Accept header present).
+
+**Live proof (temp graph, real gh + real Bifrost):** "what is the adczar repo about?" → daemon
+default resolver fetched adczar live → Sonnet gave an accurate answer (RoR analytics app;
+Snowflake/Sidekiq/Redis) → background Opus extract wrote `repo-adczar` (graph 0→1 repos). Next
+mention = instant HIT. This is the "ask about a repo ⇒ auto-added to the knowledge graph"
+behavior the owner asked to confirm — now working end-to-end. 135 tests + 1 skipped, clean.

@@ -1,0 +1,59 @@
+"""The Skill contract (north-star §4.3, spec 02 §Skill contract).
+
+A Skill is a capability with a ``name``, trigger phrases, a ``needs_confirmation``
+flag, and an async ``run(context) -> result``. Brain matches an utterance against
+each registered skill's triggers and dispatches to the first that matches.
+
+``SkillContext`` carries the per-invocation input the skill needs; ``MemoryLike``
+is the same read/write slice of the Memory contract Brain uses (brain/loop.py) —
+declared locally so skills don't import Brain.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
+
+from edith.memory.store import Node
+
+
+class MemoryLike(Protocol):
+    """The slice of the Memory contract a Skill uses (north-star §4.3)."""
+
+    def recall(self, query: str) -> list[dict[str, object]]: ...
+
+    def remember(
+        self, nodes: list[Node] | None = None, edges: list[object] | None = None
+    ) -> None: ...
+
+
+@dataclass
+class SkillContext:
+    """Per-invocation input handed to ``Skill.run``."""
+
+    utterance: str
+    memory: MemoryLike
+
+
+@dataclass
+class SkillResult:
+    """What a Skill returns. ``asked`` is the clarifying question when the skill
+    had to STOP and ask instead of acting (empty when it ran to completion)."""
+
+    skill: str
+    findings: str = ""
+    pr_url: str = ""
+    posted: bool = False
+    remembered: bool = False
+    asked: str = ""
+
+
+@runtime_checkable
+class Skill(Protocol):
+    """A dispatchable capability (spec 02 §Skill contract)."""
+
+    name: str
+    triggers: list[str]
+    needs_confirmation: bool
+
+    async def run(self, context: SkillContext) -> SkillResult: ...
