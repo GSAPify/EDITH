@@ -348,3 +348,55 @@ high: specific excepts, `CancelledError` re-raised, honest seams, imports at top
 **Slice 2 — PR-review skill** (`docs/specs/02-pr-review-skill.md`): first real autonomous action,
 exercises the Skill dispatch path. Standing housekeeping: rotate the Bifrost key; merge
 `spec/session-1-foundation` to establish `main`.
+
+---
+
+## Session 6 — 2026-07-07 — Memory Graph Viewer (branch `build/memory-viewer`)
+
+Built a local-first, **offline** knowledge-graph viewer for the Memory store. TDD on the
+Python/data + server layer (RED-first); frontend is visual.
+
+### What shipped
+- **`MemoryStore.graph_snapshot() -> dict`** (`edith/memory/store.py`): schema-introspective
+  export of ALL node tables + ALL REL tables to force-graph JSON
+  (`{"nodes":[{id,type,label,degree,<props>}],"links":[{source,target,type}]}`). Degree computed
+  in Python from link incidence; display `label` per type; Kuzu `_id`/`_label` stripped. Also
+  added `rel_tables()` (symmetric with existing `node_tables()`).
+- **Additive schema extension** (same file): `PR` node (`title,number,state`); `authored_by` +
+  `reviewed_by` REL (PR→Person); extended `owns` with Repo→PR and `relates_to` with Fact→PR.
+  Existing `test_schema_created_on_open` uses a subset (`<=`) assertion → stayed green.
+- **`edith/viewer/`** — stdlib threaded HTTP server (`ThreadingHTTPServer` +
+  `SimpleHTTPRequestHandler`), **127.0.0.1 only**, `GET /graph` → snapshot JSON, `GET /` + assets
+  → static. `make_server()` is browser-free/testable; `webbrowser.open` lives only in
+  `__main__`. Launcher: `python -m edith.viewer [--demo] [--port 8765] [--data-dir PATH]`.
+  Live path reads `EDITH_DATA_DIR/memory.kuzu`.
+- **Frontend** `edith/viewer/static/` — `index.html`/`app.js`/`style.css` + **vendored**
+  `vendor/force-graph.min.js` (vasturiano UMD, pinned **v1.49.5**, 177 KB, self-contained — no
+  CDN at runtime). Dark bg (#111214), degree-sized nodes, muted type palette, thin translucent
+  links, pan/zoom, zoom cluster (＋/−/reset/fit), node-click detail panel, type legend.
+- **`--demo` seeder** (`edith/viewer/demo_seed.py`): deterministic ~120-160 node sample
+  (Projects→Repos→PRs→People→Facts; authored_by/reviewed_by/owns/relates_to). Generic content,
+  no secrets/tokens.
+- **Spec** `docs/specs/07-memory-viewer.md`.
+
+### Zero new runtime deps
+Stdlib server + vendored JS only. No web framework. `pyproject.toml` untouched.
+
+### Verification (fresh)
+- `uv run pytest` → **70 passed, 1 skipped** (was 59+1; +11 new: graph_snapshot ×6, server ×3,
+  demo_seed ×2). Watched RED first: `graph_snapshot` → `AttributeError`; server →
+  `ModuleNotFoundError: No module named 'edith.viewer'`.
+- `uv run ruff check edith tests` → **All checks passed**
+- `uv run pyright edith` → **0 errors, 0 warnings, 0 informations**
+- **Live server check**: started `make_server` on ephemeral 127.0.0.1 port with a `--demo`-seeded
+  store → `GET /graph` = 200 `application/json`, 158 nodes / 339 links; `GET /` = 200 with
+  `<html>`; `GET /vendor/force-graph.min.js` = 200, 177267 bytes.
+
+### How to run
+`python -m edith.viewer --demo` (dense sample, opens browser) · `python -m edith.viewer` (live).
+
+### Notes / seams
+- Kuzu is single-writer: live view while `edithd` runs needs the daemon stopped first (or use
+  `--demo`, isolated temp DB). Read-only Kuzu open = deferred.
+- Repo ingestion (Slice 2) will populate the live graph for real; this viewer renders whatever
+  Memory holds.

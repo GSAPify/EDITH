@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EDITH — Memory Graph</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="graph"></div>
+
+  <div id="zoom-cluster" aria-label="zoom controls">
+    <button id="zoom-in" title="Zoom in">+</button>
+    <button id="zoom-out" title="Zoom out">&minus;</button>
+    <button id="zoom-reset" title="Reset zoom">&#8635;</button>
+    <button id="zoom-fit" title="Fit to view">&#9633;</button>
+  </div>
+
+  <aside id="panel" class="hidden" aria-live="polite">
+    <button id="panel-close" title="Close">&times;</button>
+    <h2 id="panel-label"></h2>
+    <div id="panel-type"></div>
+    <div id="panel-id"></div>
+    <dl id="panel-props"></dl>
+  </aside>
+
+  <div id="legend"></div>
+
+  <script src="/vendor/force-graph.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

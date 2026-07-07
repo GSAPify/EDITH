@@ -36,6 +36,10 @@ _NODE_SCHEMA: dict[str, str] = {
         "Repo(id STRING PRIMARY KEY, path STRING, remote STRING)"
     ),
     "Person": "CREATE NODE TABLE IF NOT EXISTS Person(id STRING PRIMARY KEY, name STRING)",
+    "PR": (
+        "CREATE NODE TABLE IF NOT EXISTS "
+        "PR(id STRING PRIMARY KEY, title STRING, number INT64, state STRING)"
+    ),
     "Fact": (
         "CREATE NODE TABLE IF NOT EXISTS "
         "Fact(id STRING PRIMARY KEY, text STRING, learned_at STRING)"
@@ -45,12 +49,16 @@ _NODE_SCHEMA: dict[str, str] = {
 # Edge tables. Kuzu REL tables are typed FROM->TO; a couple of core edges.
 _EDGE_SCHEMA: dict[str, str] = {
     "works_on": "CREATE REL TABLE IF NOT EXISTS works_on(FROM Owner TO Project)",
-    "owns": "CREATE REL TABLE IF NOT EXISTS owns(FROM Project TO Repo)",
+    "owns": (
+        "CREATE REL TABLE IF NOT EXISTS owns(FROM Project TO Repo, FROM Repo TO PR)"
+    ),
     "knows": "CREATE REL TABLE IF NOT EXISTS knows(FROM Owner TO Person)",
+    "authored_by": "CREATE REL TABLE IF NOT EXISTS authored_by(FROM PR TO Person)",
+    "reviewed_by": "CREATE REL TABLE IF NOT EXISTS reviewed_by(FROM PR TO Person)",
     # relates_to fans out from Fact to several targets -> multi-pair REL table.
     "relates_to": (
         "CREATE REL TABLE IF NOT EXISTS relates_to("
-        "FROM Fact TO Project, FROM Fact TO Repo, FROM Fact TO Person)"
+        "FROM Fact TO Project, FROM Fact TO Repo, FROM Fact TO Person, FROM Fact TO PR)"
     ),
 }
 
@@ -62,6 +70,19 @@ _TEXT_PROPS: dict[str, tuple[str, ...]] = {
     "Person": ("name",),
     "Fact": ("text",),
 }
+
+# Display-label prop per node type for the graph snapshot (falls back to id).
+_LABEL_PROP: dict[str, str] = {
+    "Owner": "name",
+    "Project": "name",
+    "Repo": "path",
+    "Person": "name",
+    "PR": "title",
+    "Fact": "text",
+}
+
+# Kuzu injects these bookkeeping keys into a whole-node RETURN; drop them.
+_KUZU_INTERNAL_KEYS = ("_id", "_label")
 
 
 @dataclass(frozen=True)
@@ -136,6 +157,55 @@ class MemoryStore:
             for name, table_type in self._rows("CALL SHOW_TABLES() RETURN name, type;")
             if table_type == "NODE"
         }
+
+    def rel_tables(self) -> set[str]:
+        """Return the set of relationship-table names currently defined."""
+        return {
+            str(name)
+            for name, table_type in self._rows("CALL SHOW_TABLES() RETURN name, type;")
+            if table_type == "REL"
+        }
+
+    def graph_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        """Export the whole graph as force-graph-shaped JSON.
+
+        Introspective: walks every node table and every REL table currently
+        defined, so schema growth (e.g. later repo-ingestion tables) renders
+        with no change here. Shape::
+
+            {"nodes": [{"id", "type", "label", "degree", <props>}],
+             "links": [{"source", "target", "type"}]}
+
+        ``degree`` is computed in Python from link incidence (undirected count).
+        """
+        links: list[dict[str, Any]] = []
+        for rel in sorted(self.rel_tables()):
+            for source, target in self._rows(
+                f"MATCH (a)-[:{rel}]->(b) RETURN a.id, b.id"
+            ):
+                links.append({"source": str(source), "target": str(target), "type": rel})
+
+        degree: dict[str, int] = {}
+        for link in links:
+            degree[link["source"]] = degree.get(link["source"], 0) + 1
+            degree[link["target"]] = degree.get(link["target"], 0) + 1
+
+        nodes: list[dict[str, Any]] = []
+        for label in sorted(self.node_tables()):
+            for (raw,) in self._rows(f"MATCH (n:{label}) RETURN n"):
+                props = {k: v for k, v in raw.items() if k not in _KUZU_INTERNAL_KEYS}
+                node_id = str(props["id"])
+                label_prop = _LABEL_PROP.get(label)
+                display = props.get(label_prop) if label_prop else None
+                node: dict[str, Any] = {
+                    "id": node_id,
+                    "type": label,
+                    "label": str(display) if display else node_id,
+                    "degree": degree.get(node_id, 0),
+                }
+                node.update({k: v for k, v in props.items() if k != "id"})
+                nodes.append(node)
+        return {"nodes": nodes, "links": links}
 
     def remember(
         self,

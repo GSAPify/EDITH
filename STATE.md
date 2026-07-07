@@ -3,9 +3,9 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** BUILDING → Slice 1 core COMPLETE (daemon shipped); ready for Slice 2
+**Current phase:** BUILDING → Slice 1 core COMPLETE (daemon shipped) + Memory Viewer shipped; ready for Slice 2
 **Active slice:** 1 — Memory + Brain (all core components + edithd daemon shipped & validated)
-**Last session:** 2026-07-07 — Session 5 (edithd daemon + Control API, autopilot; TDD + 3-reviewer validation)
+**Last session:** 2026-07-07 — Session 6 (Memory graph viewer: `graph_snapshot()` + `edith/viewer/`, stdlib server + vendored force-graph, `--demo`; TDD RED-first, 70 tests green)
 
 ## Slice status
 
@@ -18,6 +18,7 @@
 | 4 | Session awareness | ✅ done | ⬜ not started | Highest uncertainty — spec mandates a spike first |
 | 5 | Router | ✅ done | ⬜ not started | Two-call latency masking (orchestration, not one inference) |
 | 6 | Desktop control | ✅ done | ⬜ not started | Own-shell for OMC launches; Terminal.app osascript for visible term |
+| — | Memory viewer | (07) | ✅ done | Offline local graph viewer: `MemoryStore.graph_snapshot()` + `edith/viewer/` (stdlib 127.0.0.1 server, vendored force-graph UMD, `--demo` seeder, `python -m edith.viewer`). **70 tests + 1 live-skipped, ruff/pyright clean.** Zero new runtime deps. Reads live Memory; repo ingestion (Slice 2) populates it for real. |
 
 Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
@@ -27,8 +28,13 @@ Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 live-skipped, ruff/pyright clean, security/code/architecture reviewed). The daemon runs the full
 recall→reason→remember loop under a unix-socket Control API.
 
-**Session 6 → start Slice 2 (PR-review skill)** — read `docs/specs/02-pr-review-skill.md`. It's
-the first real autonomous action and exercises the Skill dispatch path end-to-end.
+**Session 6 shipped the Memory Viewer** (`docs/specs/07-memory-viewer.md`): `python -m
+edith.viewer --demo` renders a dense force-directed cloud offline; live mode reads
+`EDITH_DATA_DIR/memory.kuzu`. Schema gained `PR` + `authored_by`/`reviewed_by` (additive).
+
+**Session 7 → start Slice 2 (PR-review skill)** — read `docs/specs/02-pr-review-skill.md`. It's
+the first real autonomous action and exercises the Skill dispatch path end-to-end. Repo ingestion
+there will populate the live graph the viewer already renders.
 
 **Deferred Slice-1 seams** (pick up when their slice needs them, not blocking Slice 2):
 `compact()` (needs Session/Conversation node tables + token-counted working buffer); **Guard**
