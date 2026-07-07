@@ -36,7 +36,10 @@ _NODE_SCHEMA: dict[str, str] = {
         "Repo(id STRING PRIMARY KEY, path STRING, remote STRING, "
         "name STRING, summary STRING, language STRING, last_commit_date STRING)"
     ),
-    "Person": "CREATE NODE TABLE IF NOT EXISTS Person(id STRING PRIMARY KEY, name STRING)",
+    "Person": (
+        "CREATE NODE TABLE IF NOT EXISTS "
+        "Person(id STRING PRIMARY KEY, name STRING, gh_handle STRING)"
+    ),
     "PR": (
         "CREATE NODE TABLE IF NOT EXISTS "
         "PR(id STRING PRIMARY KEY, title STRING, number INT64, state STRING)"
@@ -72,7 +75,7 @@ _TEXT_PROPS: dict[str, tuple[str, ...]] = {
     "Owner": ("name", "email"),
     "Project": ("name", "status"),
     "Repo": ("path", "remote", "name", "summary"),
-    "Person": ("name",),
+    "Person": ("name", "gh_handle"),
     "Fact": ("text",),
 }
 
@@ -154,6 +157,19 @@ class MemoryStore:
             self._run(ddl)
         for ddl in _EDGE_SCHEMA.values():
             self._run(ddl)
+        self._migrate_person_gh_handle()
+
+    def _migrate_person_gh_handle(self) -> None:
+        """Add ``Person.gh_handle`` to a pre-existing DB (spec 02 §Data model).
+
+        A fresh DB already has the column from ``_NODE_SCHEMA`` so this is a
+        no-op; the live 206-node DB predates it, so the guarded ALTER adds it.
+        Idempotent either way — ``TABLE_INFO`` returns the column name at index 1
+        (row shape: ``[property id, name, type, default, primary key]``).
+        """
+        columns = {str(row[1]) for row in self._rows("CALL TABLE_INFO('Person') RETURN *")}
+        if "gh_handle" not in columns:
+            self._run("ALTER TABLE Person ADD gh_handle STRING DEFAULT ''")
 
     def node_tables(self) -> set[str]:
         """Return the set of node-table names currently defined."""

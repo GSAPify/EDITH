@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 from edith.bus import Event, EventBus
@@ -37,6 +37,7 @@ from edith.finder import ResolveResult, ResolveStatus
 from edith.memory.secrets import sanitize_text
 from edith.memory.store import Node
 from edith.router import ModelResponse, Tier
+from edith.skills import Skill, SkillContext
 
 _SYSTEM_PREAMBLE = (
     "You are EDITH, the owner's always-on local assistant. Use the recalled "
@@ -90,10 +91,15 @@ class Brain:
         router: RouterLike,
         is_paused: Callable[[], bool] = lambda: False,
         resolve_repo: ResolveRepoLike | None = None,
+        skills: Sequence[Skill] | None = None,
     ) -> None:
         self._bus = bus
         self._memory = memory
         self._router = router
+        # Skill registry (spec 02). Default None -> empty list, so a Brain with
+        # no skills behaves exactly as the pre-skill loop (existing tests green),
+        # mirroring the resolve_repo=None no-op pattern.
+        self._skills = list(skills or [])
         # Zero-arg predicate wired from the daemon's RuntimeState. Default
         # not-paused so Brain used standalone (and the existing tests) behave
         # exactly as before.
@@ -113,6 +119,12 @@ class Brain:
             return
 
         utterance = str(event.payload.get("text", ""))
+
+        # 0. DISPATCH (spec 02): the first skill whose trigger is a substring of
+        # the utterance owns this turn — run it, publish skill.result, and skip
+        # the recall→answer path. No match -> fall through to the answer loop.
+        if await self._dispatch_skill(utterance):
+            return
 
         # 1. RECALL
         recalled = self._memory.recall(utterance)
@@ -147,6 +159,38 @@ class Brain:
                 "answer": response.text,
             },
         )
+
+    async def _dispatch_skill(self, utterance: str) -> bool:
+        """Run the first skill whose trigger matches; publish its result.
+
+        Returns True when a skill handled the turn (caller then returns), False
+        when nothing matched (caller falls through to the recall→answer path).
+        """
+        lowered = utterance.lower()
+        skill = next(
+            (
+                s
+                for s in self._skills
+                if any(trigger.lower() in lowered for trigger in s.triggers)
+            ),
+            None,
+        )
+        if skill is None:
+            return False
+
+        result = await skill.run(SkillContext(utterance=utterance, memory=self._memory))
+        await self._bus.publish(
+            "skill.result",
+            source=skill.name,
+            payload={
+                "findings": result.findings,
+                "pr_url": result.pr_url,
+                "posted": result.posted,
+                "remembered": result.remembered,
+                "asked": result.asked,
+            },
+        )
+        return True
 
     async def _resolve_on_miss(
         self, utterance: str, recalled: list[dict[str, object]]

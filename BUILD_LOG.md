@@ -582,3 +582,58 @@ No code. Housekeeping + kickoff before a context compaction.
   145 Fact, embedded), secret-scan clean. Viewer serves it at `:8765`.
 - **Next: Slice 2 (PR-review)** on `build/slice-2-pr-review` (cut off `master`). Full kickoff brief +
   gotchas are in `STATE.md` §"▶ SLICE 2". Standing item: **rotate the Bifrost key.**
+
+---
+
+## Session 12 — 2026-07-07 — Slice 2: PR-review skill (built + verified + live-smoked)
+
+Delegated the TDD build to an Opus executor with a strict brief, then verified independently
+(read every source file, ran the full suite, ran a live read-only smoke). Did NOT trust the
+agent's "Complete." — good thing, its final message was a confused "send me the port," but the
+code on disk was correct. Tests-green ≠ works stays the rule; live smoke is what proved it.
+
+**What shipped**
+- `edith/skills/base.py` — the `Skill` Protocol (`name`/`triggers`/`needs_confirmation`/`run`)
+  + `SkillContext` (utterance + memory) + `SkillResult`. This dispatch interface didn't exist;
+  the spec assumed it did. Brain went straight to the model before.
+- `edith/skills/gh.py` — injectable async `gh` runner (`asyncio.create_subprocess_exec`,
+  arg-lists only, never a shell string; `GhError` on nonzero exit). `GhRunner` type alias so
+  tests never touch GitHub.
+- `edith/skills/pr_review.py` — `PRReviewSkill`, the 7-step flow. All deps injected
+  (Router, gh, confirm, speak) → fully offline-testable.
+- `edith/brain/loop.py` — trigger-match dispatch registry (`Brain(skills=[...])`, default empty
+  = pre-skill behavior, mirroring the `resolve_repo=None` no-op pattern). First skill whose
+  trigger is a substring of the utterance owns the turn, publishes `skill.result`, short-circuits
+  the answer path.
+- `edith/memory/store.py` — `Person.gh_handle` added additively via a guarded `TABLE_INFO` →
+  `ALTER … ADD` migration (`_migrate_person_gh_handle`). No-op on fresh DBs, adds the column on
+  the live one. Needed to run `gh pr list --author <handle>` and to make Step-7 "faster next
+  time" real.
+
+**The crux — confirm gate.** `gh pr review` is the only GitHub-write call site and lives inside
+a single `if await self._confirm(...)` branch — unreachable unless confirm returns True. Default
+`_deny`. Proven two ways: `test_declined_never_posts` (confirm→False ⇒ recorded `pr review`
+calls == []) and the live smoke below. The diff is `sanitize_text`-redacted BEFORE the model
+message is assembled (`test_planted_secret_redacted_before_router`, non-vacuous).
+
+**Key decisions**
+- Confirm defaults to DENY (not a blocking prompt) — voice/interactive confirm is Slice 3/4;
+  honest Slice-2 behavior is "review, surface, remember, don't post."
+- Inline Opus review rubric rather than shelling out to OMC `/code-review` from `edithd` (heavier
+  integration; kept the slice shippable — noted as a follow-up).
+- No haiku *model* call for the ack; `speak()` fires the "reviewing now…" line directly (real
+  two-call latency-mask lands in Slice 5).
+
+**Verification**
+- 130 passed + 1 skipped (was 114+1; +16 new tests). `ruff check` clean. `pyright` 0 errors.
+- Migration verified non-destructive on the LIVE DB: 26 Person / 23 Repo / 145 Fact intact,
+  existing names preserved, `gh_handle` column present. (Had to `lsof -ti tcp:8765 | xargs kill`
+  the viewer first — Kuzu single-process lock, again.)
+- **LIVE smoke:** real `gh` + real Bifrost Opus on `patterninc/agents#2423` (kemenyc, +28/-2),
+  `confirm=deny`. Opus produced a genuine review that caught a real regression (kms moving from
+  always-on `PI_TOOLSMITH_SERVERS` to a toggle-gated loader breaks existing users). `posted=False`;
+  recorded gh calls were exactly `pr list` + `pr diff` — ZERO `pr review` writes.
+
+**Follow-ups:** OMC `/code-review` rubric reuse; Slack PR-discovery fallback + confirm Slack-MCP
+reachable from `edithd`; diff-size gate (>2000 lines ⇒ ASK before a big Opus call); review-style
+learning loop. Standing item: **rotate the Bifrost key.** Kuzu single-process lock unchanged.

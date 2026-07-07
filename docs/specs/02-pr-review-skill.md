@@ -396,15 +396,49 @@ python -c "from edith.bus import publish; publish('voice.utterance', {'text': 'r
 
 ---
 
-## Completion Record — PR-Review Skill — (date TBD)
+## Completion Record — PR-Review Skill — 2026-07-07 (Session 12)
 
-> Fill this at session end per `../SESSION-PROTOCOL.md` §4 (canonical template lives there).
-> Leave empty until the slice is built.
-
-- **What shipped:**
-- **How it works:**
+- **What shipped:** `PRReviewSkill` — EDITH's first end-to-end autonomous action. The full
+  7-step flow: resolve person from Memory → locate the open PR via `gh` → fetch the diff →
+  redact → route a deep review to Opus → surface findings → **confirm gate** → remember. Plus
+  the Skill contract + a trigger-match dispatch registry wired into Brain (the interface the
+  spec said had to exist first — it didn't; now it does).
+- **How it works:** Brain matches an utterance against each registered Skill's `triggers`
+  (case-insensitive substring); the first match owns the turn, runs, publishes `skill.result`,
+  and short-circuits the recall→answer path. An empty registry (the default) leaves Brain
+  identical to before. The skill injects all deps (Router, `gh` runner, `confirm`, `speak`) so
+  it runs fully offline in tests. The **confirm gate is the crux**: the `gh pr review` write is
+  the *only* GitHub-write call site and lives inside a single `if await self._confirm(...)`
+  branch — unreachable unless confirm returns True. Default confirm is `_deny` (never posts).
+  The diff is `sanitize_text`-redacted *before* the model message is assembled, so a secret in
+  checked-in code never reaches Opus. Memory is written whether or not the review is posted, and
+  the Person node is stored with its `gh_handle` so the next invocation is an instant HIT.
 - **Key decisions made during build:**
-- **Deviations from spec + why:**
-- **Files created / changed:**
-- **Verification / tests run + results:**
-- **Follow-ups / known gaps:**
+  - **`Person.gh_handle` added additively** (guarded `TABLE_INFO` → `ALTER … ADD` migration).
+    The ingested Person nodes had `{name}` only; the handle is required to run `gh pr list
+    --author` and to make Step-7 "faster next time" real. Migration verified non-destructive on
+    the live DB (26 Person / 23 Repo / 145 Fact intact).
+  - **Confirm gate defaults to DENY**, not to a blocking prompt. Voice/interactive confirm is
+    Slice 3/4; until then the honest Slice-2 behavior is "review, surface, remember, don't post."
+  - **Inline Opus review rubric** rather than shelling out to OMC `/code-review` from `edithd`
+    (that integration is heavier; kept the slice shippable).
+- **Deviations from spec + why:** (1) No haiku *model* call for the ack — `speak()` fires the
+  "reviewing now…" line directly (a real haiku call adds latency/cost for no user-visible gain
+  at Slice 2; the two-call latency-mask is fully realized in Slice 5). (2) Slack PR-discovery
+  fallback (Step 2, zero-results branch) deferred — v1 ASKs the owner instead; Slack-MCP-at-
+  runtime is still an open question. Both noted as follow-ups.
+- **Files created / changed:** NEW `edith/skills/{__init__,base,gh,pr_review}.py`; EDIT
+  `edith/brain/loop.py` (dispatch), `edith/memory/store.py` (gh_handle + migration). Tests:
+  NEW `tests/test_{pr_review_skill,brain_skill_dispatch,skills_gh,person_gh_handle_migration}.py`.
+- **Verification / tests run + results:** 130 passed + 1 skipped (was 114+1; +16 new),
+  `ruff check` clean, `pyright` 0 errors. Mandatory tests confirmed non-vacuous by reading
+  source: `test_declined_never_posts` (confirm→False ⇒ `review_calls == []`) and
+  `test_planted_secret_redacted_before_router` (asserts secrets present in raw diff, absent from
+  the Router payload). **LIVE smoke:** real `gh` + real Bifrost Opus against `patterninc/agents`
+  PR #2423 (kemenyc, +28/-2), `confirm=deny` — Opus produced a genuine review (caught a real
+  always-on→toggle-gated regression), `posted=False`, and the recorded `gh` calls were exactly
+  `pr list` + `pr diff` with **zero** `pr review` write.
+- **Follow-ups / known gaps:** OMC `/code-review` rubric reuse; Slack PR-discovery fallback +
+  confirm Slack-MCP reachable from `edithd` at runtime; diff-size gate (>2000 lines ⇒ ASK before
+  a large Opus call) — the size-branch isn't wired yet; review-style learning loop (needs 3-5
+  real reviews). Kuzu single-process lock still applies (stop the viewer before opening the DB).

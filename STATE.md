@@ -3,12 +3,12 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** Slice 1 + Viewer + Ingest + NL Finder DONE & consolidated. Ready for Slice 2.
-**Active slice:** → **Slice 2 (PR-review skill)** on branch `build/slice-2-pr-review` (cut off master).
+**Current phase:** Slice 1 + Viewer + Ingest + NL Finder + **Slice 2 (PR-review)** DONE. Ready for Slice 3 (Voice).
+**Active slice:** → next is **Slice 3 (Voice)**. Slice 2 built + verified + live-smoked on branch `build/slice-2-pr-review` (uncommitted → committed this session; ready to push + PR).
 **Repo:** everything is on **`master`** (renamed from `main`, Session 11). All feature branches merged
 + deleted; `master` is the GitHub default. New work = branch off `master`, PR in. Full graph LIVE in
 `~/.edith/data/memory.kuzu` (206 nodes: 23 Repo, 26 Person, 12 Project, 145 Fact — embedded, no leak).
-**Prev session:** 2026-07-07 — Session 10 (closed the ingest↔finder embedding gap, TDD). Ingest now writes via `VectorMemoryStore` so Facts are embedded on `remember` (Fix 1, `run_ingest(embedder=…)` seam); `VectorMemoryStore.backfill_embeddings()` + `python -m edith.ingest --reembed` embed existing graph-only Facts with the LOCAL embedder, no model calls, idempotent, credential-free (Fix 2); `find_repos` adds a per-token graph fallback that fires ONLY when both signals score zero, so a populated graph never silently returns nothing (Fix 3). 114 tests green, ruff/pyright clean. Live: `--reembed` embedded the 145 real Facts; `python -m edith.finder "seo tools"` now returns real repos (was "No repos matched"). Known limitation documented: Kuzu embedded is single-process (lock contention across viewer/finder/ingest; prod fix = route all DB access through `edithd`).
+**Prev session:** 2026-07-07 — Session 12 (built Slice 2 PR-review skill, TDD, delegated to Opus executor then verified independently + live-smoked). Added the Skill contract + Brain trigger-dispatch registry (didn't exist before — Brain went straight to model), `PRReviewSkill` 7-step flow, injectable async `gh` runner, and `Person.gh_handle` via a guarded non-destructive migration. Confirm-gate is the crux and is proven unreachable-on-deny by both a non-vacuous test and a live smoke (real gh + real Opus on `patterninc/agents#2423` → real review, `posted=False`, zero `pr review` writes). 130 tests + 1 skipped, ruff/pyright clean. Session 10 (prior): closed the ingest↔finder embedding gap, TDD. Ingest now writes via `VectorMemoryStore` so Facts are embedded on `remember` (Fix 1, `run_ingest(embedder=…)` seam); `VectorMemoryStore.backfill_embeddings()` + `python -m edith.ingest --reembed` embed existing graph-only Facts with the LOCAL embedder, no model calls, idempotent, credential-free (Fix 2); `find_repos` adds a per-token graph fallback that fires ONLY when both signals score zero, so a populated graph never silently returns nothing (Fix 3). 114 tests green, ruff/pyright clean. Live: `--reembed` embedded the 145 real Facts; `python -m edith.finder "seo tools"` now returns real repos (was "No repos matched"). Known limitation documented: Kuzu embedded is single-process (lock contention across viewer/finder/ingest; prod fix = route all DB access through `edithd`).
 
 ## Slice status
 
@@ -16,7 +16,7 @@
 |---|-------|------|-------|-------|
 | 0 | North-star architecture | ✅ done | — | Authoritative doc |
 | 1 | Memory + Brain | ✅ done | ✅ core done | Memory (Kuzu graph + sqlite-vec) + **bus** + **Router** (Bifrost, live-smoke green) + **Brain loop** + **edithd daemon** (unix-socket Control API pause/resume/kill/status, 0600, startup/shutdown ordering, pause-suspends-Memory, launchd plist template) — **59 tests + 1 live-skipped, ruff/pyright clean, 3-reviewer validated**. Documented seams left for their slices: `compact()`, Guard (budget/authorize), encrypted-volume mount, VoiceIO/SessionBus wiring. |
-| 2 | PR-review skill | ✅ done | ⬜ not started | Confirm-gate before GitHub review submit |
+| 2 | PR-review skill | ✅ done | ✅ done | `edith/skills/` (Skill contract + `gh` runner + `PRReviewSkill`) + Brain trigger-dispatch + `Person.gh_handle` (guarded migration). Confirm-gate is the crux: `gh pr review` unreachable unless `confirm()==True`, default DENY. Diff redacted before Opus. **130 tests + 1 skipped, ruff/pyright clean.** LIVE-smoked: real gh + real Opus on `patterninc/agents#2423`, confirm=deny → real review, `posted=False`, zero `pr review` writes. |
 | 3 | Voice | ✅ done | ⬜ not started | ElevenLabs primary, local fallback; wake+STT local |
 | 4 | Session awareness | ✅ done | ⬜ not started | Highest uncertainty — spec mandates a spike first |
 | 5 | Router | ✅ done | ⬜ not started | Two-call latency masking (orchestration, not one inference) |
@@ -29,34 +29,35 @@ Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
 ## Next action
 
-### ▶ SLICE 2 — PR-review skill (START HERE)
-Branch `build/slice-2-pr-review` is already cut off `master`. Read `docs/specs/02-pr-review-skill.md`.
-This is the first real autonomous action; it exercises the Skill dispatch path end-to-end AND is the
-payoff of Slices 1/ingest/finder — the memory graph now has real people + repos to resolve against.
+### ▶ SLICE 3 — Voice (START HERE)
+Slice 2 is done, verified, and live-smoked (see the Completion Record in `docs/specs/02-pr-review-skill.md`).
+Next is **Slice 3 (Voice)** — read `docs/specs/03-voice.md`. ElevenLabs primary + local neural fallback
+for TTS; local wake-word + STT. The bus seams already exist: Brain publishes `brain.decision` and
+skills call an injected `speak()` (currently `_silent` no-op in `edith/skills/pr_review.py`) — Slice 3
+wires a real VoiceIO to those. The confirm gate is where voice pays off: the Slice-2 `confirm` callable
+(default `_deny`) becomes a spoken "Should I post this review?" → owner voice/keyword → True/False.
 
-**Canonical flow:** "EDITH, review Tavishi's PR" → resolve the *person* + *repo* (REUSE
-`edith/finder` `find_repos`/`resolve_repo`; 26 Person + 23 Repo nodes exist in the live graph) →
-find the PR via `gh` → fetch the diff → review it (route deep review to **Opus**) → **ASK before
-posting anything to GitHub** (the review submit is a shared-state write → `Skill.needs_confirmation
-= True`, the confirm-gate is the crux) → post/summarize. **Ask-when-unsure**: if person/repo/PR
-can't be resolved, ASK rather than guess (owner requirement).
+**Reuse, don't rebuild:** `edith/router` (Tier.HAIKU for cheap TTS-prep/acks), `edith/skills`
+(inject a real `speak`/`confirm` in place of the `_silent`/`_deny` defaults), `edith/brain` (already
+subscribes to voice bus topics; `voice.utterance` is its input event), `edith/daemon` (VoiceIO/SessionBus
+wiring seam noted in edithd).
 
-**Reuse, don't rebuild:** `edith/router` (Opus review / Sonnet search), `edith/memory` (people/repos),
-`edith/brain` (Skill dispatch + the Skill contract: `name`/`triggers`/`needs_confirmation`/`run`),
-`edith/ingest` (repo context), `edith/finder` (resolve people/repos). `gh` is authed as **GSAPify**
-(scopes `repo`, `read:org`) — can read PRs and post reviews.
-
-**Gotchas the orchestrator MUST heed (learned this build):**
+**Gotchas the orchestrator MUST heed (still true):**
 - Delegated agents return a terse "Complete." — **verify independently + do a LIVE run.** Tests
-  green ≠ works (the ingest→finder embed bug passed 110 tests but returned nothing live).
+  green ≠ works (the ingest→finder embed bug passed 110 tests but returned nothing live; Slice 2's
+  agent even ended with a confused "send me the port" message — the code was fine, but only reading
+  the source + a live smoke proved it).
 - **Kuzu is single-process** → stop the viewer (`lsof -ti tcp:8765 | xargs kill`) before running
-  anything that opens `memory.kuzu`.
+  anything that opens `memory.kuzu` (hit this again in Slice 2's migration check).
 - Bifrost creds are in gitignored `.env` (source it: `set -a; source .env; set +a`). **KEY STILL
   NEEDS ROTATING** (pasted in chat 2026-07-06).
 - The owner's Pattern commit identity ≠ GSAPify (author filters unreliable) → resolve people via
   the graph + `gh pr list`, not `--author=GSAPify`.
-- Confirm-gate before ANY `gh` write (posting a review). Live smoke: read a real PR (read-only) to
-  prove the fetch+review path; never auto-submit.
+
+**Slice-2 seam for Slice 3 to grab:** `PRReviewSkill(router, *, gh, confirm, speak, org)` — `confirm`
+and `speak` are injected; the daemon wires the real voice ones. `Person.gh_handle` now exists (guarded
+migration in `MemoryStore._migrate_person_gh_handle`). Skill dispatch is `Brain(skills=[...])`; empty
+registry = pre-skill behavior.
 
 **Deferred Slice-1 seams** (pick up when their slice needs them, not blocking Slice 2):
 `compact()` (needs Session/Conversation node tables + token-counted working buffer); **Guard**
