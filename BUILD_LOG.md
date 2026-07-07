@@ -400,3 +400,48 @@ Stdlib server + vendored JS only. No web framework. `pyproject.toml` untouched.
   `--demo`, isolated temp DB). Read-only Kuzu open = deferred.
 - Repo ingestion (Slice 2) will populate the live graph for real; this viewer renders whatever
   Memory holds.
+
+---
+
+## Session 8 — 2026-07-07 — Repo-knowledge Ingestion (redaction-first)
+
+**Goal:** Populate the LIVE Memory graph from the owner's real `~/gitstuff` patterninc
+clones, so the viewer renders a real dense graph. Strict TDD, redaction unbypassable.
+
+### What shipped
+New package `edith/ingest/`: `discover.py` (local patterninc clones as ground truth — not
+`gh author`), `fetch.py` (local README + CLAUDE.md repo/.claude + best-effort `gh` metadata),
+`redact.py` (the `sanitize_text` choke-point), `extract.py` (injected Router; Sonnet
+classify/relevance → Opus deep, budget-aware skip < 0.4), `graph_map.py` (Node/Edge →
+`remember`), `pipeline.py` + `__main__.py` (`python -m edith.ingest`, `--dry-run`/`--repos`/
+`--limit`/`--data-dir`/`--max-tokens`, incremental skip on `Repo.last_commit_date`, bounded
+concurrency, secret-safe stdout status report, one-time global `~/.claude/CLAUDE.md` owner
+context). Spec `docs/specs/08-repo-ingest.md`.
+
+### Schema growth (additive, store.py)
+`Repo` gained `name/summary/language/last_commit_date`; `Fact` gained `source`; `authored_by`
+gained the `Repo→Person` pair. Fresh-DB only (`IF NOT EXISTS`); a pre-existing db needs
+`ALTER TABLE` migration before the full run (no live db exists yet — flagged as open question).
+
+### Security: real bug found by the live smoke
+The planted-secret test (RED first: the secret reached the fake Router until `redact.py`
+existed) passed, but the live smoke against the owner's REAL global CLAUDE.md leaked the
+`refresh_token` value into the temp DB. Root cause: `_ASSIGNMENT` in `secrets.py` let `(\S+)`
+capture the markdown `**` right after `refresh_token:**`, redacting the wrapper and leaving the
+`1//0g…` value. Fixed root-cause (skip `[*`'"]` wrapper punct before the value capture) + added
+the Google `1//` refresh-token shape to `_TOKEN_PREFIX`. RED→GREEN regression tests added with
+FAKE tokens only. Re-run smoke secret-scan reads clean.
+
+### Verification
+97 tests green (1 live-skipped), ruff + pyright clean. Live smoke: `agents` + `agentsmith`
+(both Opus, relevance 0.95/0.72) → 55 facts + owner context = 58 nodes / 55 links to a TEMP
+dir; secret-scan (`GOCSPX-`/`1//0g`/`sk-`/`-----BEGIN`) = NONE.
+
+### How to run the full ingest
+`python -m edith.ingest` (env: BIFROST_BASE_URL/API_KEY/MODEL_*). Preview with `--dry-run`.
+Full contributed-repos run is orchestrator-gated pending review.
+
+### Notes / seams
+- Global `~/.claude/CLAUDE.md` `client_id` (a public ID, not a secret) correctly survives;
+  `client_secret`/`refresh_token`/PEM redacted.
+- Existing-DB migration deferred until a live `memory.kuzu` predates the schema growth.

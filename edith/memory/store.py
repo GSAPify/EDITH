@@ -33,7 +33,8 @@ _NODE_SCHEMA: dict[str, str] = {
     ),
     "Repo": (
         "CREATE NODE TABLE IF NOT EXISTS "
-        "Repo(id STRING PRIMARY KEY, path STRING, remote STRING)"
+        "Repo(id STRING PRIMARY KEY, path STRING, remote STRING, "
+        "name STRING, summary STRING, language STRING, last_commit_date STRING)"
     ),
     "Person": "CREATE NODE TABLE IF NOT EXISTS Person(id STRING PRIMARY KEY, name STRING)",
     "PR": (
@@ -42,7 +43,7 @@ _NODE_SCHEMA: dict[str, str] = {
     ),
     "Fact": (
         "CREATE NODE TABLE IF NOT EXISTS "
-        "Fact(id STRING PRIMARY KEY, text STRING, learned_at STRING)"
+        "Fact(id STRING PRIMARY KEY, text STRING, learned_at STRING, source STRING)"
     ),
 }
 
@@ -53,7 +54,11 @@ _EDGE_SCHEMA: dict[str, str] = {
         "CREATE REL TABLE IF NOT EXISTS owns(FROM Project TO Repo, FROM Repo TO PR)"
     ),
     "knows": "CREATE REL TABLE IF NOT EXISTS knows(FROM Owner TO Person)",
-    "authored_by": "CREATE REL TABLE IF NOT EXISTS authored_by(FROM PR TO Person)",
+    # authored_by fans out from PR and from Repo to a Person (repo ingestion
+    # attributes clones to their owners via gh metadata) -> multi-pair REL table.
+    "authored_by": (
+        "CREATE REL TABLE IF NOT EXISTS authored_by(FROM PR TO Person, FROM Repo TO Person)"
+    ),
     "reviewed_by": "CREATE REL TABLE IF NOT EXISTS reviewed_by(FROM PR TO Person)",
     # relates_to fans out from Fact to several targets -> multi-pair REL table.
     "relates_to": (
@@ -66,7 +71,7 @@ _EDGE_SCHEMA: dict[str, str] = {
 _TEXT_PROPS: dict[str, tuple[str, ...]] = {
     "Owner": ("name", "email"),
     "Project": ("name", "status"),
-    "Repo": ("path", "remote"),
+    "Repo": ("path", "remote", "name", "summary"),
     "Person": ("name",),
     "Fact": ("text",),
 }
@@ -75,7 +80,7 @@ _TEXT_PROPS: dict[str, tuple[str, ...]] = {
 _LABEL_PROP: dict[str, str] = {
     "Owner": "name",
     "Project": "name",
-    "Repo": "path",
+    "Repo": "name",
     "Person": "name",
     "PR": "title",
     "Fact": "text",
