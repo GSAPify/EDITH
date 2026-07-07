@@ -40,6 +40,7 @@ from edith.bus import EventBus
 from edith.daemon.control import BudgetView, ControlServer
 from edith.daemon.securestore import LocalSecureStore, SecureStore
 from edith.daemon.state import RuntimeState
+from edith.skills import PRReviewSkill
 
 _KEYRING_SERVICE = "edithd"
 _SOCKET_NAME = "edithd.sock"
@@ -119,11 +120,17 @@ class EdithDaemon:
         #    Brain subscribes itself to voice.utterance and reads is_paused from
         #    the RuntimeState (single source of truth). Pass a predicate, not the
         #    property value, so it re-reads live state on every utterance.
+        # Register skills so a voice.utterance can dispatch them (spec 02
+        # build-step 3). PRReviewSkill takes its speak/confirm from the defaults
+        # (_silent / _deny) until Slice 3 wires the real VoiceIO — so a triggered
+        # review runs and surfaces via the bus but NEVER posts to GitHub
+        # autonomously (the confirm gate stays denied without a real confirmer).
         self._brain = Brain(
             bus=self.bus,
             memory=self._memory,
             router=self._router,
             is_paused=lambda: self.state.is_paused,
+            skills=[PRReviewSkill(self._router)],
         )
 
         # 5. start the Control API server on the unix socket.

@@ -637,3 +637,20 @@ message is assembled (`test_planted_secret_redacted_before_router`, non-vacuous)
 **Follow-ups:** OMC `/code-review` rubric reuse; Slack PR-discovery fallback + confirm Slack-MCP
 reachable from `edithd`; diff-size gate (>2000 lines ⇒ ASK before a big Opus call); review-style
 learning loop. Standing item: **rotate the Bifrost key.** Kuzu single-process lock unchanged.
+
+**Post-build advisor pass caught two real gaps (fixed / corrected):**
+1. **edithd didn't register the skill** — the dispatch registry I added to Brain was empty in
+   the actual product (daemon built `Brain(...)` with no `skills=`). Fixed: `edithd` now builds
+   `Brain(skills=[PRReviewSkill(self._router)])` with default `_silent`/`_deny` (dispatches +
+   surfaces via `skill.result`, never posts until Slice 3 voice). Added
+   `test_pr_review_skill_registered_and_dispatches` (bus `voice.utterance` → skill.result, no
+   model call). 131 tests now.
+2. **"Instant HIT next time" was overstated** — verified live on the 206-node DB:
+   `recall("Niraj Kale")` returns only the Person (0 Repo hits, `gh_handle=""`). So against the
+   real graph, resolution ALWAYS follows the designed ASK path (handle empty → ask handle; no
+   person→repo path in `recall` → ask repo). Step-7 remembers the handle but writes no person↔repo
+   edge, so repo resolution stays an ASK. Corrected the claim in the spec + STATE; logged the true
+   HIT as a follow-up. Same failure shape as the embed bug — the fake (FakeMemory returning 1
+   person + 1 repo) encoded an assumption the real component doesn't satisfy; only a live check
+   caught it. Also elevated the un-wired diff-size cost gate and the known-shapes-only redaction
+   from buried follow-ups to visible gaps.

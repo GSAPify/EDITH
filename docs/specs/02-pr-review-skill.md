@@ -410,9 +410,13 @@ python -c "from edith.bus import publish; publish('voice.utterance', {'text': 'r
   it runs fully offline in tests. The **confirm gate is the crux**: the `gh pr review` write is
   the *only* GitHub-write call site and lives inside a single `if await self._confirm(...)`
   branch — unreachable unless confirm returns True. Default confirm is `_deny` (never posts).
-  The diff is `sanitize_text`-redacted *before* the model message is assembled, so a secret in
-  checked-in code never reaches Opus. Memory is written whether or not the review is posted, and
-  the Person node is stored with its `gh_handle` so the next invocation is an instant HIT.
+  The diff is `sanitize_text`-redacted *before* the model message is assembled, so a **known
+  secret shape** (`sk-bf-`, `GOCSPX-`, refresh-token, `gho_`) in checked-in code never reaches
+  Opus — see the "known gaps" note on shapes not yet covered. Memory is written whether or not
+  the review is posted. **Registered in the daemon's Brain** (`edithd` builds
+  `Brain(skills=[PRReviewSkill(router)])`) with the default `_silent`/`_deny` surfaces, so a bus
+  `voice.utterance` matching the triggers dispatches and surfaces via `skill.result` but NEVER
+  posts to GitHub autonomously until Slice 3 wires a real confirmer.
 - **Key decisions made during build:**
   - **`Person.gh_handle` added additively** (guarded `TABLE_INFO` → `ALTER … ADD` migration).
     The ingested Person nodes had `{name}` only; the handle is required to run `gh pr list
@@ -438,7 +442,25 @@ python -c "from edith.bus import publish; publish('voice.utterance', {'text': 'r
   PR #2423 (kemenyc, +28/-2), `confirm=deny` — Opus produced a genuine review (caught a real
   always-on→toggle-gated regression), `posted=False`, and the recorded `gh` calls were exactly
   `pr list` + `pr diff` with **zero** `pr review` write.
-- **Follow-ups / known gaps:** OMC `/code-review` rubric reuse; Slack PR-discovery fallback +
-  confirm Slack-MCP reachable from `edithd` at runtime; diff-size gate (>2000 lines ⇒ ASK before
-  a large Opus call) — the size-branch isn't wired yet; review-style learning loop (needs 3-5
-  real reviews). Kuzu single-process lock still applies (stop the viewer before opening the DB).
+- **Follow-ups / known gaps:**
+  - **Resolution against the real graph currently ALWAYS asks** (verified live on the 206-node
+    DB): ingested Person nodes carry `gh_handle=""` (migration default) → the "what's their
+    handle?" ASK fires; and `store.recall(name)` surfaces the Person but **no Repo** (recall only
+    traverses `Fact-[:relates_to]->anchor`; the person→repo link is `Repo-[:authored_by]->Person`,
+    which recall doesn't walk) → the "which repo?" ASK fires. This is the *designed* ask-when-
+    unsure path and is safe, but the "instant HIT next time" optimization is only **partial**:
+    Step-7 remembers the handle (so the handle becomes a HIT after the first ASK), but `_remember`
+    writes no person↔repo edge, so the repo still needs an ASK. Making the next invocation a true
+    HIT needs either a person↔repo edge written at Step 7 **and** recall taught to traverse it, or
+    resolution routed through `finder.find_repos`. Follow-up.
+  - **Diff-size cost gate NOT wired** (owner cost rule — kept visible, not buried): `max_tokens`
+    caps *output*, but the *input* diff is unbounded — a huge PR ships to Opus in full with no
+    ASK. Spec §Cost wants ">2000 lines ⇒ ASK first." Build this before any real autonomous use.
+  - **Redaction covers known secret shapes only** (`sk-bf-`/`GOCSPX-`/refresh-token/`gho_`). A
+    diff is a higher-risk surface (AWS `AKIA…`, generic `token=`/`password=`, high-entropy blobs)
+    that likely passes through. Broaden `sanitize_text` for the diff path.
+  - `GhError` from `run()` propagates to the bus subscriber (no in-skill catch) — decide the
+    surface (speak an error?) when voice lands.
+  - OMC `/code-review` rubric reuse; Slack PR-discovery fallback + confirm Slack-MCP reachable
+    from `edithd` at runtime; review-style learning loop (needs 3-5 real reviews).
+  - Kuzu single-process lock still applies (stop the viewer before opening the DB).

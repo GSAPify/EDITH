@@ -138,6 +138,32 @@ async def test_pause_via_control_api_makes_brain_skip_model_call(data_dir):
         await daemon.stop()
 
 
+async def test_pr_review_skill_registered_and_dispatches(data_dir):
+    """spec 02 build-step 3: the daemon registers PRReviewSkill, so a matching
+    voice.utterance dispatches to it (publishes skill.result) instead of the
+    default recall→answer path. Unknown person + SpyMemory ⇒ the skill ASKs and
+    never calls the model — proving dispatch, not the answer loop, handled it."""
+    router = FakeRouter()
+    daemon = _daemon(data_dir, SpyMemory(), router)
+    await daemon.start()
+    results: list[object] = []
+
+    async def capture(event) -> None:  # noqa: ANN001
+        results.append(event.payload)
+
+    daemon.bus.subscribe("skill.result", capture)
+    try:
+        await daemon.bus.publish(
+            "voice.utterance", source="voice", payload={"text": "review Tavishi's PR"}
+        )
+    finally:
+        await daemon.stop()
+
+    assert router.calls == []          # default answer path NOT taken
+    assert len(results) == 1           # the skill published its result
+    assert results[0]["asked"]         # unknown person ⇒ ASK (no gh, no model)
+
+
 async def test_kill_shuts_down_gracefully_and_compacts(data_dir):
     memory = SpyMemory()
     daemon = _daemon(data_dir, memory, FakeRouter())
