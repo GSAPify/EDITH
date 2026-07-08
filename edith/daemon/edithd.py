@@ -30,6 +30,7 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import keyring
 from keyring.errors import KeyringError
@@ -47,6 +48,19 @@ from edith.skills import PRReviewSkill
 
 _KEYRING_SERVICE = "edithd"
 _SOCKET_NAME = "edithd.sock"
+
+
+class VoiceIOLike(Protocol):
+    """The slice of VoiceIO that edithd uses (spec 03 §Wiring).
+
+    Mirrors the MemoryLike / RouterLike pattern: edithd depends on this
+    interface, not the concrete VoiceIO class, so tests can pass fakes without
+    subclassing. A real ``edith.voice.io.VoiceIO`` satisfies this structurally.
+    """
+
+    async def speak(self, text: str) -> None: ...
+
+    def set_paused(self, paused: bool) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -99,6 +113,7 @@ class EdithDaemon:
         secure_store: SecureStore | None = None,
         budget: BudgetView | None = None,
         resolve_repo: ResolveRepoLike | None = None,
+        voice: VoiceIOLike | None = None,
     ) -> None:
         self._secrets = secrets  # held in RAM only; never logged
         # Realtime resolve-on-miss (spec 09). Injected for tests; when absent
@@ -107,6 +122,11 @@ class EdithDaemon:
         self._resolve_repo = resolve_repo
         self._memory = memory
         self._router = router
+        # Optional VoiceIOLike (spec 03 §Wiring). When provided: speak seam is
+        # wired into PRReviewSkill so findings are spoken, and set_paused()
+        # mirrors the Control API pause/resume commands. Default None → no
+        # audio, all existing behaviour unchanged.
+        self._voice: VoiceIOLike | None = voice
         self._store: SecureStore = secure_store or LocalSecureStore(data_dir)
         self._budget: BudgetView = budget or _ZeroBudget()
         self.state = RuntimeState()
@@ -137,25 +157,35 @@ class EdithDaemon:
             resolver = self._make_default_resolver(self._memory)
 
         # Register skills so a voice.utterance can dispatch them (spec 02
-        # build-step 3). PRReviewSkill takes its speak/confirm from the defaults
-        # (_silent / _deny) until Slice 3 wires the real VoiceIO — so a triggered
-        # review runs and surfaces via the bus but NEVER posts to GitHub
-        # autonomously (the confirm gate stays denied without a real confirmer).
+        # build-step 3). When VoiceIO is wired, pass its speak seam into
+        # PRReviewSkill so review findings are spoken aloud. Without VoiceIO
+        # the default _silent seam keeps the confirm gate safely denied.
+        pr_skill = (
+            PRReviewSkill(self._router, speak=self._voice.speak)
+            if self._voice is not None
+            else PRReviewSkill(self._router)
+        )
         self._brain = Brain(
             bus=self.bus,
             memory=self._memory,
             router=self._router,
             is_paused=lambda: self.state.is_paused,
             resolve_repo=resolver,
-            skills=[PRReviewSkill(self._router)],
+            skills=[pr_skill],
         )
 
         # 5. start the Control API server on the unix socket.
+        # VoiceIO pause/resume: mirror Control API transitions into voice.set_paused()
+        # via the on_pause / on_resume callback seam (same pattern as on_kill).
+        # Default lambda: None when no VoiceIO is wired → no-op, behaviour unchanged.
+        _voice = self._voice
         self._control = ControlServer(
             socket_path=self.socket_path,
             state=self.state,
             budget=self._budget,
             on_kill=self._on_kill,
+            on_pause=(lambda: _voice.set_paused(True)) if _voice is not None else (lambda: None),
+            on_resume=(lambda: _voice.set_paused(False)) if _voice is not None else (lambda: None),
         )
         await self._control.start()
 
