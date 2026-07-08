@@ -422,18 +422,30 @@ path. Measure with `time.perf_counter()` around the STT → bus → speak() → 
   the ControlServer `on_pause`/`on_resume` callback seam). Non-vacuous redaction test in
   `test_voice_io.py` (planted `sk-bf-…` present in raw, absent from what the TTS adapter received).
   CLI harnesses smoke cleanly WITHOUT the voice extra (print an install message, exit 0).
-- **Follow-ups / known gaps (owner LIVE-SMOKE surface — cannot be verified headlessly):**
-  - Install the audio stack: `brew install portaudio` then `uv pip install -e '.[voice]'` (heavy:
-    ctranslate2, onnxruntime).
-  - Add `ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` to `.env` / Keychain (never in chat). Pick a
-    British-male voice ID (spec §Legal flag — style, not the copyrighted character).
-  - **Broaden `sanitize_text` coverage BEFORE enabling real ElevenLabs TTS.** `VoiceIO.speak`
-    redacts in the right place (before the adapter), but `sanitize_text` catches only known shapes
-    (`sk-bf-`/`GOCSPX-`/refresh-token/`gho_`). Unlike Slice 2 (a miss reached Opus via the Bifrost
-    *proxy*), a miss here sends text to **ElevenLabs, a third-party cloud** — a real exfiltration
-    surface and an org "never leak secrets" concern. The path is inert today (no key, no `[voice]`
-    extra, stub seams), but this must be widened before live TTS is switched on.
-  - Grant macOS mic permission to the terminal/launchd process (spec open question).
-  - Implement the real seam bodies: mic capture (sounddevice stream), openWakeWord detection loop,
-    faster-whisper STT, and audio playback — then run `python -m edith.voice.{wakeword,stt,tts}_test`.
-  - Slice-5 barge-in→SupervisedSession steering; haiku two-call ack.
+- **Session 13 follow-up (2026-07-08) — audio stack + seam bodies landed:**
+  - Installed the `[voice]` extra (portaudio + elevenlabs 2.56 + faster-whisper + openwakeword +
+    sounddevice). `uv.lock` regenerated.
+  - **`sanitize_text` broadened (DONE, 8 tests)** for the ElevenLabs egress — added standalone
+    AWS (`AKIA`/`ASIA`), Google API key (`AIza`), Slack (`xox…`), and `sk_`-underscore shapes.
+    Rationale: unlike Slice 2 (a miss reached Opus via the Bifrost *proxy*), a miss here sends text
+    to **ElevenLabs, a third-party cloud** — a real exfiltration surface + org "never leak secrets".
+  - **Fixed the ElevenLabs adapter:** worker-2 used the v1 `elevenlabs.generate` API, absent in
+    v2.56 → rewrote to `AsyncElevenLabs.text_to_speech.stream(..., output_format="pcm_24000")` with
+    a matched 24 kHz sink.
+  - **Implemented the mic/wake/STT seam bodies** in `edith/voice/live.py` + `python -m edith.voice`
+    (openWakeWord `hey_jarvis` prebuilt model, faster-whisper `small.en`, sounddevice 16 kHz loop
+    in a worker thread bridged to asyncio). Kept OUT of `io.py` so the tested core is untouched.
+  - **Headless-verified what's checkable without hardware:** all four SDKs load + inference path
+    runs (whisper `small.en` transcribe, wake-model load, client construct), package imports without
+    the extra, adapters build. **NOT verified:** real mic capture / wake accuracy / transcription
+    quality / audible playback — `live.py` is doc/introspection-derived, never run on hardware.
+- **Remaining owner LIVE-SMOKE surface (needs mic/speaker/key):**
+  - Add `ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` to `.env`/Keychain (never in chat); British-male
+    voice ID (style, not the copyrighted character). PCM output needs a paid tier (else mp3 + decode).
+  - Grant macOS mic permission to the terminal/launchd process.
+  - Run `python -m edith.voice --engine piper` then `--engine elevenlabs`; expect first-run fixes
+    (v1 = fixed 5 s capture window not energy VAD; barge-in fires at `_on_wake`, after capture).
+  - `tts_test --engine elevenlabs` fires the stream fire-and-forget and doesn't await it → won't
+    surface an auth error on a bad key; check for actual audio, not the "complete" line.
+  - Slice-5: barge-in→SupervisedSession steering; haiku two-call ack; reuse one output stream
+    (the default sink opens a fresh `RawOutputStream` per `speak`).

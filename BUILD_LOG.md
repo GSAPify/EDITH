@@ -717,3 +717,24 @@ the audio. Slice-5 owns the haiku two-call ack + barge-in→SupervisedSession st
 **tmux lesson for next time:** the pty ceiling is real on this box. Keep concurrent workers ≤ 2, or
 prune stale omc-* sessions first (with the owner's OK). Freeing an idle worker's pane is the clean
 way to make room without touching other projects.
+
+**Session 13 continued — seam bodies + audio stack (owner asked me to "run this until I get keys").**
+Owner ran the live-enablement steps for Slice 3 (accepting no headless audio testing):
+- Installed `[voice]` extra (portaudio + elevenlabs 2.56 + faster-whisper + openwakeword + sounddevice).
+- Hardened `sanitize_text` (TDD, 8 tests) for the ElevenLabs egress: standalone AWS/Google/Slack/`sk_`
+  shapes. This is the security prereq before any text leaves to a 3rd-party TTS cloud.
+- Caught + fixed a real bug: worker-2's ElevenLabs default factory called the v1 `elevenlabs.generate`
+  API, which does not exist in the installed v2.56. Introspected the installed SDK (ground truth beats
+  possibly-stale docs) and rewrote to `AsyncElevenLabs.text_to_speech.stream(..., output_format="pcm_24000")`
+  with a matched 24 kHz sink.
+- Implemented the mic/wake/STT seam bodies in NEW `edith/voice/live.py` + `python -m edith.voice`
+  (openWakeWord `hey_jarvis` prebuilt, faster-whisper `small.en`, sounddevice 16 kHz loop in a worker
+  thread bridged to asyncio via run_coroutine_threadsafe). Deliberately isolated from the tested
+  `io.py` core so the headless suite is untouched.
+- Verified everything checkable without hardware: 164 tests + 1 skipped, ruff clean, pyright 0 errors,
+  ZERO type:ignore in voice; all four SDKs load + run their inference path (whisper transcribe on a
+  synthetic array, wake-model load, client construct); package imports without the extra; adapters build.
+- **Honest gap:** `live.py` is written to the installed SDK APIs but NEVER run on real hardware — no
+  mic/speaker/key here. Real capture/wake/transcription/playback is the owner's live smoke. Documented
+  the v1 simplifications (fixed 5 s capture window; barge-in at `_on_wake` not at wake instant; per-speak
+  output stream) in spec 03 §Follow-ups.

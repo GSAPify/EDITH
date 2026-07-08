@@ -28,10 +28,20 @@ _ASSIGNMENT = re.compile(
 # PEM / private-key block headers.
 _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 
-# Provider-shaped token prefixes (Google OAuth client secret + refresh token,
-# OpenAI-style, GitHub PATs). The ``1//`` shape is Google's OAuth refresh token.
+# Provider-shaped tokens. Two families:
+#  1. PREFIXED tokens — a known prefix then the rest of the run. Covers Google
+#     client secret (GOCSPX-), OpenAI/Stripe/ElevenLabs (sk- / sk_), GitHub PATs
+#     (ghp_ / github_pat_), and Slack (xoxb-/xoxp-/…). ``\b`` guards the prefix so
+#     ``disk_usage`` / ``task-force`` don't trip ``sk``.
+#  2. FIXED-shape standalone tokens that carry no ``key =`` label but can ride
+#     inside a Brain response into spoken text (→ ElevenLabs, a third-party
+#     cloud): AWS access-key ids (AKIA/ASIA + 16), Google API keys (AIza + run),
+#     and Google's OAuth refresh token (1//…).
 _TOKEN_PREFIX = re.compile(
-    r"\b(?:GOCSPX-|sk-[A-Za-z0-9-]+|ghp_|github_pat_)\S+|1//[A-Za-z0-9_-]{10,}"
+    r"\b(?:GOCSPX-|sk[-_]|ghp_|github_pat_|xox[baprs]-)\S+"
+    r"|1//[A-Za-z0-9_-]{10,}"
+    r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"
+    r"|\bAIza[0-9A-Za-z_-]{20,}"
 )
 
 
