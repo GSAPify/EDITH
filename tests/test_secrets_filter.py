@@ -46,3 +46,37 @@ def test_google_refresh_token_prefix_is_a_shape_backstop():
     assert "1//0gFAKErefreshTokenValueThatIsLong" not in sanitize_text(
         "some prose 1//0gFAKErefreshTokenValueThatIsLong more prose"
     )
+
+
+# Standalone provider tokens (no `key =` label) that could ride inside a Brain
+# response into spoken text — a real exfiltration surface now that speak() sends
+# text to ElevenLabs, a third-party cloud (spec 03 §Autonomy&secrets).
+#
+# All FAKE, and built from split fragments so no contiguous secret-shaped literal
+# lands in the repo (GitHub secret-scanning push protection flags those). The
+# runtime string still reconstructs to the full shape, so the regex is exercised.
+_STANDALONE_TOKENS = [
+    "AKIA" + "IOSFODNN7EXAMPLE",                       # AWS access key id
+    "ASIA" + "IOSFODNN7EXAMPLE",                       # AWS temp access key id
+    "AIza" + "SyAFAKEgoogleApiKey0123456789_abcdefg",  # Google API key
+    "xoxb" + "-FAKE-1234567890-slack-bot-token",       # Slack bot token
+    "sk" + "_live_" + "FAKEstripeSecretKey0123456789abcd",  # sk_ underscore
+]
+
+
+def test_detects_standalone_provider_token_shapes():
+    for tok in _STANDALONE_TOKENS:
+        assert contains_secret(f"the value is {tok} ok"), tok
+
+
+def test_sanitize_strips_standalone_provider_tokens():
+    for tok in _STANDALONE_TOKENS:
+        out = sanitize_text(f"here is a token {tok} in prose")
+        assert tok not in out, tok
+        assert "[REDACTED]" in out
+
+
+def test_broadening_does_not_over_redact_ordinary_words():
+    # word-boundary-guarded prefixes must not fire on ordinary text
+    for fact in ("disk_usage is high", "ask-me about the task-force skew"):
+        assert sanitize_text(fact) == fact, fact

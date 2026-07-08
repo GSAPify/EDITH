@@ -89,24 +89,39 @@ class ElevenLabsAdapter(TTSAdapter):
         return _ElevenLabsHandle(task)
 
     def _default_factory(self) -> ElevenLabsStreamFactory:
-        """Build a streaming factory that imports ``elevenlabs`` lazily."""
+        """Build a streaming factory over the ElevenLabs **v2** async client.
+
+        Imports ``elevenlabs`` lazily (only when no factory is injected), so the
+        module still imports without the ``[voice]`` extra. Requests raw
+        ``pcm_24000`` so chunks feed a 24 kHz sounddevice stream directly.
+
+        NOT headless-verified — needs a real API key + network (owner live-smoke).
+        PCM output formats require a paid ElevenLabs tier; on a free key, switch
+        ``output_format`` to an mp3 variant and decode before the sink.
+        """
 
         async def _stream(api_key: str, voice_id: str, text: str) -> AsyncGenerator[bytes, None]:
-            import elevenlabs  # pyright: ignore[reportMissingImports]
+            from elevenlabs.client import AsyncElevenLabs
 
-            audio_iter = elevenlabs.generate(
-                api_key=api_key, voice=voice_id, text=text, stream=True
-            )
-            for chunk in audio_iter:
+            client = AsyncElevenLabs(api_key=api_key)
+            async for chunk in client.text_to_speech.stream(
+                voice_id=voice_id,
+                text=text,
+                model_id="eleven_turbo_v2_5",
+                output_format="pcm_24000",
+            ):
                 yield chunk
 
         return _stream
 
     def _default_sink(self) -> AudioSink:
-        """Build an audio sink that imports ``sounddevice`` lazily."""
-        import sounddevice as sd  # pyright: ignore[reportMissingImports]
+        """Build a sounddevice sink at 24 kHz to match the ``pcm_24000`` stream.
 
-        out = sd.RawOutputStream(samplerate=22050, channels=1, dtype="int16")
+        Imports ``sounddevice`` lazily. NOT headless-verified (needs a speaker).
+        """
+        import sounddevice as sd
+
+        out = sd.RawOutputStream(samplerate=24000, channels=1, dtype="int16")
         out.start()
 
         def _write(chunk: bytes) -> None:
