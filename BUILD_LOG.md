@@ -674,3 +674,46 @@ default resolver fetched adczar live → Sonnet gave an accurate answer (RoR ana
 Snowflake/Sidekiq/Redis) → background Opus extract wrote `repo-adczar` (graph 0→1 repos). Next
 mention = instant HIT. This is the "ask about a repo ⇒ auto-added to the knowledge graph"
 behavior the owner asked to confirm — now working end-to-end. 135 tests + 1 skipped, clean.
+
+---
+
+## Session 13 — 2026-07-08 — Slice 3: Voice (built by an OMC tmux team)
+
+Owner asked to build the next slice AND to watch OMC agents work in tmux. Ran the OMC implicit-team
+mechanism as lead: named background `executor` workers on a shared task board (TaskCreate/Update +
+SendMessage). Native TeamCreate/TeamDelete tools weren't exposed in this session, so it was the
+implicit team, not a formal one — workers spawned as real tmux panes (confirmed by a `respawn pane`
+error, below).
+
+**Decomposition (4 file-scoped tasks, dependency-ordered):** #1 foundation (deps + TTSAdapter ABC)
+→ #2 adapters (ElevenLabs+Piper) ∥ #3 VoiceIO core → #4 edithd wiring + CLI harnesses.
+
+**Orchestration story (the honest bits):**
+- Spawned worker-1 for #1; verified independently (core deps NOT polluted; 139 tests). Contract
+  clean → unblocked #2/#3.
+- Tried to spawn worker-2 + worker-3 in parallel → `respawn pane failed: fork failed: Device not
+  configured` — a tmux pty/fork ceiling (47 ptys open across stale omc-* sessions from other
+  projects). Did NOT kill other projects' sessions (shared state, no consent). Instead shut down
+  the idle worker-1 (its #4 was blocked anyway) to free a pane, then ran worker-2 ∥ worker-3.
+- worker-3 finished #3; verified (redaction test non-vacuous). worker-2 finished #2; verified
+  (heavy libs NOT at module top; module imports without the [voice] extra; select_adapter raises).
+- Reused worker-3 for #4. It delivered, but wired pause/resume by MONKEYPATCHING RuntimeState
+  (`self.state.pause = ...  # type: ignore[method-assign]`). Rejected in the verify pass — sent it
+  back with the clean pattern (ControlServer `on_pause`/`on_resume` callbacks, mirroring `on_kill`).
+  It applied the fix (then sent a confused "already done" msg); I shut it down and confirmed the
+  monkeypatch + type:ignore were gone.
+- Lead cleanup: found one more avoidable `# type: ignore[assignment]` in adapters.py (worker-2) —
+  fixed at root by typing `_default_piper_runner -> _PiperProcess` (Process satisfies the protocol).
+
+**Result:** 161 passed + 1 skipped (+26 voice), ruff clean, pyright 0 errors, ZERO type:ignore in
+new source. CLI harnesses degrade cleanly without the [voice] extra (clear install message, exit 0).
+
+**Honest gap (stated, not hidden):** the audio path — real mic capture, openWakeWord detection,
+faster-whisper STT, and speaker playback — are seam stubs. They need hardware + the [voice] extra +
+`brew install portaudio` + an ElevenLabs key, so they're the owner's LIVE-SMOKE surface, not
+headless-verifiable. Same discipline as the PR-review live smoke: green tests prove the wiring, not
+the audio. Slice-5 owns the haiku two-call ack + barge-in→SupervisedSession steering.
+
+**tmux lesson for next time:** the pty ceiling is real on this box. Keep concurrent workers ≤ 2, or
+prune stale omc-* sessions first (with the owner's OK). Freeing an idle worker's pane is the clean
+way to make room without touching other projects.

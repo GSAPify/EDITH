@@ -51,11 +51,15 @@ class ControlServer:
         state: RuntimeState,
         budget: BudgetView,
         on_kill: Callable[[], None],
+        on_pause: Callable[[], None] = lambda: None,
+        on_resume: Callable[[], None] = lambda: None,
     ) -> None:
         self._path = Path(socket_path)
         self._state = state
         self._budget = budget
         self._on_kill = on_kill
+        self._on_pause = on_pause
+        self._on_resume = on_resume
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -109,9 +113,15 @@ class ControlServer:
         if cmd == "status":
             return {"ok": True, "status": self._status()}
         if cmd == "pause":
-            return self._transition(self._state.pause)
+            result = self._transition(self._state.pause)
+            if result.get("ok"):
+                self._on_pause()
+            return result
         if cmd == "resume":
-            return self._transition(self._state.resume)
+            result = self._transition(self._state.resume)
+            if result.get("ok"):
+                self._on_resume()
+            return result
         if cmd == "kill":
             self._state.kill()
             self._on_kill()

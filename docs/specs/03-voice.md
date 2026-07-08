@@ -384,15 +384,56 @@ path. Measure with `time.perf_counter()` around the STT → bus → speak() → 
 
 ---
 
-## Completion Record — Voice — (date TBD)
+## Completion Record — Voice — 2026-07-08 (Session 13)
 
-> Fill this at session end per `../SESSION-PROTOCOL.md` §4 (canonical template lives there).
-> Leave empty until the slice is built.
-
-- **What shipped:**
-- **How it works:**
-- **Key decisions made during build:**
-- **Deviations from spec + why:**
-- **Files created / changed:**
-- **Verification / tests run + results:**
-- **Follow-ups / known gaps:**
+- **What shipped:** `edith/voice/` — the VoiceIO layer with all hardware/ML behind injectable
+  seams so the test suite runs with ZERO heavy deps. `TTSAdapter` ABC + `TTSHandle` protocol;
+  `ElevenLabsAdapter` (streaming, primary) + `PiperAdapter` (local fallback) with `select_adapter`;
+  `VoiceIO` (bus-wired speak/wake orchestrator); edithd wiring; and three CLI smoke harnesses
+  (`tts_test`, `wakeword_test`, `stt_test`) for the owner's live audio test. Built by an OMC
+  tmux team (3 executor workers, lead-orchestrated) — see BUILD_LOG Session 13.
+- **How it works:** `VoiceIO.speak(text)` runs `sanitize_text` (Guard redaction) FIRST, enforces a
+  500-char cap, then calls the injected `TTSAdapter.speak`, retaining the returned `TTSHandle` for
+  barge-in. The wake path stops any active handle (barge-in), publishes `voice.wake`, then publishes
+  `voice.utterance {text, confidence}` — suppressed while paused (wake always fires so resume can be
+  voice-triggered). Heavy libs (`elevenlabs`, `sounddevice`, `piper`, `openwakeword`,
+  `faster-whisper`) are imported INSIDE adapter/harness methods, never at module top, and gated
+  behind an optional `[voice]` extra. edithd gained an optional `voice: VoiceIOLike | None` param:
+  when wired it threads `voice.speak` into `PRReviewSkill` (findings are spoken) and mirrors Control
+  API pause/resume into `voice.set_paused` via new `on_pause`/`on_resume` ControlServer callbacks
+  (same seam pattern as `on_kill`). Default `voice=None` → behaviour unchanged.
+- **Key decisions made during build:** openWakeWord prebuilt **"hey jarvis"** model to start (skips
+  the 30-sample custom-training blocker); `faster-whisper small.en`; Piper local fallback;
+  `sounddevice`. All hardware/ML behind seams — the honest split is "core is unit-tested; audio is
+  owner-live-smoked."
+- **Deviations from spec + why:** (1) No haiku *model* call for the ack (that's the Slice-5 two-call
+  pattern); VoiceIO just plays what Brain hands `speak()`. (2) Barge-in steering into a
+  SupervisedSession (spec §Barge-in) is deferred to Slice 5 — VoiceIO owns only the audio-cancel
+  half today. (3) Actual mic capture / wake-model load / whisper inference / audio playback are seam
+  stubs, not implemented — they need hardware and are the owner's live-smoke surface (below).
+- **Files created / changed:** NEW `edith/voice/{__init__,tts,adapters,io,tts_test,wakeword_test,
+  stt_test}.py`; EDIT `edith/daemon/edithd.py` (voice wiring), `edith/daemon/control.py`
+  (on_pause/on_resume callbacks), `pyproject.toml` ([voice] extra). Tests: NEW
+  `tests/test_voice_{tts,adapters,io,wiring}.py`.
+- **Verification / tests run + results:** 161 passed + 1 skipped (was 135+1; +26 voice tests:
+  4 tts + 13 adapters + 5 io + 4 wiring), `ruff` clean, `pyright` 0 errors, **zero `# type: ignore`**
+  in the new source (lead fixed one `[assignment]` suppression at root by typing the default Piper
+  runner as the `_PiperProcess` protocol, and one monkeypatch of RuntimeState by replacing it with
+  the ControlServer `on_pause`/`on_resume` callback seam). Non-vacuous redaction test in
+  `test_voice_io.py` (planted `sk-bf-…` present in raw, absent from what the TTS adapter received).
+  CLI harnesses smoke cleanly WITHOUT the voice extra (print an install message, exit 0).
+- **Follow-ups / known gaps (owner LIVE-SMOKE surface — cannot be verified headlessly):**
+  - Install the audio stack: `brew install portaudio` then `uv pip install -e '.[voice]'` (heavy:
+    ctranslate2, onnxruntime).
+  - Add `ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` to `.env` / Keychain (never in chat). Pick a
+    British-male voice ID (spec §Legal flag — style, not the copyrighted character).
+  - **Broaden `sanitize_text` coverage BEFORE enabling real ElevenLabs TTS.** `VoiceIO.speak`
+    redacts in the right place (before the adapter), but `sanitize_text` catches only known shapes
+    (`sk-bf-`/`GOCSPX-`/refresh-token/`gho_`). Unlike Slice 2 (a miss reached Opus via the Bifrost
+    *proxy*), a miss here sends text to **ElevenLabs, a third-party cloud** — a real exfiltration
+    surface and an org "never leak secrets" concern. The path is inert today (no key, no `[voice]`
+    extra, stub seams), but this must be widened before live TTS is switched on.
+  - Grant macOS mic permission to the terminal/launchd process (spec open question).
+  - Implement the real seam bodies: mic capture (sounddevice stream), openWakeWord detection loop,
+    faster-whisper STT, and audio playback — then run `python -m edith.voice.{wakeword,stt,tts}_test`.
+  - Slice-5 barge-in→SupervisedSession steering; haiku two-call ack.

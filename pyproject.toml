@@ -12,6 +12,16 @@ dependencies = [
     "tenacity>=9",
 ]
 
+[project.optional-dependencies]
+voice = [
+    "elevenlabs",
+    "faster-whisper",
+    "openwakeword",
+    "piper-tts",
+    "sounddevice",
+    "numpy",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
