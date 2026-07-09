@@ -127,6 +127,8 @@ def _blocking_listen(
     frames_per_utterance = int(_SAMPLE_RATE * utterance_seconds / _FRAME_SAMPLES)
     _log.info("VoiceIO live loop up: wake=%s stt=%s", wake_model, stt_model)
 
+    debug = os.environ.get("EDITH_VOICE_DEBUG") == "1"
+    n_frames, peak = 0, 0.0
     with sd.RawInputStream(
         samplerate=_SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME_SAMPLES
     ) as stream:
@@ -137,6 +139,16 @@ def _blocking_listen(
             # (e.g. "hey_edith"), NOT the path/name we passed. Only one wake model
             # is loaded, so take the max score rather than guess the key.
             score = max(scores.values()) if isinstance(scores, dict) and scores else 0.0
+            if debug:
+                # ~1 s heartbeat: mic level (rms) tells us if audio is arriving at
+                # all; peak wake score tells us how close we are to the threshold.
+                n_frames += 1
+                peak = max(peak, float(score))
+                if n_frames % 12 == 0:
+                    rms = float(np.sqrt(np.mean(np.square(frame.astype(np.float32)))))
+                    print(f"[debug] mic_rms={rms:8.1f}  peak_wake_score={peak:.3f}"
+                          f"  (threshold {wake_threshold})", flush=True)
+                    peak = 0.0
             if float(score) < wake_threshold:
                 continue
 

@@ -94,3 +94,37 @@ tier heuristics = Slice 5.
   (running `--reembed` requires no other EDITH process on the DB). The production fix is routing
   ALL DB access through `edithd` (one owner of the handle; every other surface talks over the
   Control API). Noted, not built — out of scope for the embedding-gap fix.
+
+---
+
+## ✅ RESOLVED (Session 14, 2026-07-09) — it was a bad onnxruntime version
+
+**ROOT CAUSE + FIX:** `onnxruntime>=1.20` (we had 1.27.0) **silently miscomputes openWakeWord's
+2022-era ONNX models on macOS arm64** → all wake scores collapse to ~0. **Pinned `onnxruntime<1.20`**
+(1.18.1) in the `[voice]` extra → `alexa`=1.0 on openWakeWord's own test clip and **`hey_edith`=0.911
+on "hey edith"**. The trained model was fine all along. To apply: `uv pip install 'onnxruntime==1.18.1'`.
+Live tuning: the mic ran quiet (rms 300–1240); if it under-triggers, lower `EDITH_WAKE_THRESHOLD`.
+
+**(historical) Symptom:** even the reference `hey_jarvis`/`alexa` models scored flat 0.000 on clean
+audio — which is what (correctly) pointed to an inference/runtime bug, not the trained model.
+
+**Confirmed working / ruled OUT:**
+- Mic captures fine (debug rms ~35 silence → 300–1240 speech; `EDITH_VOICE_DEBUG=1`).
+- onnxruntime 1.27 works; openWakeWord **hardcodes `CPUExecutionProvider`** (model.py:154,
+  utils.py:85/92) → CoreML EP was never used; forcing CPU changed nothing.
+- Not tflite-fallback, not clip length (tested 5.6 s padded "hey jarvis"×3), not threshold
+  (score is 0.000, not just-below).
+- Feed is textbook: int16 1280-sample frames; predict() converts int16 internally (model.py).
+- openWakeWord 0.6.0 + feature models (embedding 1326578 B, melspec 1087958 B) match training.
+
+**Prime remaining suspects:** (1) **numpy 2.x incompatibility** silently breaking the
+melspectrogram/embedding compute; (2) corrupted/mismatched bundled feature models. **NEXT probe:**
+inspect the melspectrogram INTERMEDIATE output on a clean clip (is it degenerate/constant?); if so
+try `numpy<2` in the .venv. Test source: `say -o /tmp/hj.wav --data-format=LEI16@16000 "hey jarvis"`.
+
+**Everything else in Voice is DONE:** ElevenLabs TTS verified audibly (`afplay ~/.edith/edith_online.wav`),
+STT/bus/adapters built+tested, live.py mic loop confirmed capturing. hey_edith.onnx trained on
+SageMaker (recall 0.42) at `~/.edith/models/hey_edith.onnx`; `EDITH_WAKE_MODEL` wired in gitignored .env.
+SageMaker scripts committed (`scripts/sagemaker/`, branch build/voice-wake-config / PR #4).
+AWS: jobs done + S3 cleared; `edith-sagemaker-exec-role` still exists (SSO expired before delete).
+Standing: rotate the ElevenLabs key (was pasted in chat).
