@@ -24,13 +24,18 @@ from edith.voice.tts import TTSAdapter, TTSHandle
 
 
 class _FakeHandle:
-    """Records stop() calls; satisfies TTSHandle protocol."""
+    """Records stop() calls + a controllable done() flag; satisfies TTSHandle."""
 
-    def __init__(self) -> None:
+    def __init__(self, done: bool = False) -> None:
         self.stopped = False
+        self._done = done
 
     def stop(self) -> None:
         self.stopped = True
+        self._done = True
+
+    def done(self) -> bool:
+        return self._done
 
 
 class _FakeTTS(TTSAdapter):
@@ -144,3 +149,30 @@ async def test_paused_suppresses_utterance_but_not_wake() -> None:
     topics = [e.topic for e in events]
     assert "voice.wake" in topics, "voice.wake must always fire"
     assert "voice.utterance" not in topics, "utterance must be suppressed while paused"
+
+
+async def test_is_speaking_reflects_handle_lifetime() -> None:
+    """is_speaking (the half-duplex mic gate) tracks the active handle's done()."""
+    tts = _FakeTTS()
+    bus, _ = _make_bus_spy()
+    vio = VoiceIO(bus=bus, tts=tts)
+
+    assert vio.is_speaking is False  # nothing spoken yet
+    await vio.speak("talking now")
+    assert vio.is_speaking is True  # handle live, not done
+    tts._handle._done = True  # playback finished
+    assert vio.is_speaking is False
+
+
+async def test_stuck_stream_guard_frees_the_mic() -> None:
+    """A wedged TTS task (never done) must not keep the mic gated forever."""
+    now = [1000.0]
+    tts = _FakeTTS()
+    bus, _ = _make_bus_spy()
+    vio = VoiceIO(bus=bus, tts=tts, max_speak_seconds=30.0, clock=lambda: now[0])
+
+    await vio.speak("this stream will stall and never report done")
+    assert vio.is_speaking is True
+    now[0] += 31.0  # past the stall ceiling
+    assert vio.is_speaking is False  # guard released the gate
+    assert tts._handle.stopped is True  # and abandoned the wedged stream
