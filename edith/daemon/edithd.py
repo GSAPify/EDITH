@@ -44,7 +44,10 @@ from edith.daemon.state import RuntimeState
 from edith.finder import ResolveResult
 from edith.finder import resolve_repo as _resolve_repo_impl
 from edith.memory.store import MemoryStore
-from edith.skills import PRReviewSkill
+from edith.session.bus import SessionBus
+from edith.session.collector import TranscriptCollector
+from edith.session.narrator import Narrator
+from edith.skills import PRReviewSkill, SessionQuerySkill
 
 _KEYRING_SERVICE = "edithd"
 _SOCKET_NAME = "edithd.sock"
@@ -114,6 +117,7 @@ class EdithDaemon:
         budget: BudgetView | None = None,
         resolve_repo: ResolveRepoLike | None = None,
         voice: VoiceIOLike | None = None,
+        enable_session_awareness: bool = False,
     ) -> None:
         self._secrets = secrets  # held in RAM only; never logged
         # Realtime resolve-on-miss (spec 09). Injected for tests; when absent
@@ -127,12 +131,19 @@ class EdithDaemon:
         # mirrors the Control API pause/resume commands. Default None → no
         # audio, all existing behaviour unchanged.
         self._voice: VoiceIOLike | None = voice
+        # Session awareness (spec 04). SessionBus is always wired (cheap, no I/O — it
+        # feeds the Control API last_event and backs SessionQuerySkill). The live
+        # transcript collector + idle-narration loop only spin up when explicitly
+        # enabled, so unit tests never tail the owner's real ~/.claude/projects.
+        self._enable_session_awareness = enable_session_awareness
         self._store: SecureStore = secure_store or LocalSecureStore(data_dir)
         self._budget: BudgetView = budget or _ZeroBudget()
         self.state = RuntimeState()
         self.bus = EventBus()
         self._brain: Brain | None = None
         self._control: ControlServer | None = None
+        self._session_bus: SessionBus | None = None
+        self._session_tasks: list[asyncio.Task[None]] = []
         self._stopped = asyncio.Event()
 
     @property
@@ -156,14 +167,26 @@ class EdithDaemon:
         if resolver is None and isinstance(self._memory, MemoryStore):
             resolver = self._make_default_resolver(self._memory)
 
+        # Session awareness (spec 04): SessionBus normalizes transcript records onto
+        # the bus and feeds the Control API last_event (RuntimeState). Always built.
+        self._session_bus = SessionBus(self.bus, runtime_state=self.state)
+
         # Register skills so a voice.utterance can dispatch them (spec 02
         # build-step 3). When VoiceIO is wired, pass its speak seam into
         # PRReviewSkill so review findings are spoken aloud. Without VoiceIO
         # the default _silent seam keeps the confirm gate safely denied.
+        speak = self._voice.speak if self._voice is not None else None
         pr_skill = (
-            PRReviewSkill(self._router, speak=self._voice.speak)
-            if self._voice is not None
+            PRReviewSkill(self._router, speak=speak)
+            if speak is not None
             else PRReviewSkill(self._router)
+        )
+        # SessionQuerySkill answers "what is session 2 doing?" via Brain dispatch
+        # (spec 04 §Step 4). Its state provider is bound to the live SessionBus map.
+        session_skill = (
+            SessionQuerySkill(self._session_bus.session_states, router=self._router, speak=speak)
+            if speak is not None
+            else SessionQuerySkill(self._session_bus.session_states, router=self._router)
         )
         self._brain = Brain(
             bus=self.bus,
@@ -171,8 +194,12 @@ class EdithDaemon:
             router=self._router,
             is_paused=lambda: self.state.is_paused,
             resolve_repo=resolver,
-            skills=[pr_skill],
+            skills=[pr_skill, session_skill],
         )
+
+        # Live transcript tap + idle narration — only when explicitly enabled.
+        if self._enable_session_awareness:
+            self._start_session_awareness(speak)
 
         # 5. start the Control API server on the unix socket.
         # VoiceIO pause/resume: mirror Control API transitions into voice.set_paused()
@@ -205,6 +232,37 @@ class EdithDaemon:
 
         return resolve
 
+    def _start_session_awareness(self, speak: object) -> None:
+        """Spin up the live transcript collector + idle-narration loop (spec 04).
+
+        The Narrator speaks meaningful transitions; with no VoiceIO wired it narrates
+        to a silent seam (events still update the Control API last_event via SessionBus).
+        Both run as background tasks cancelled on shutdown.
+        """
+        assert self._session_bus is not None
+
+        async def _silent(_text: str) -> None:
+            return None
+
+        narrator = Narrator(
+            self.bus,
+            speak if callable(speak) else _silent,  # type: ignore[arg-type]
+            router=self._router,
+        )
+        collector = TranscriptCollector(self._session_bus.ingest)
+        loop = asyncio.get_running_loop()
+        self._session_tasks = [
+            loop.create_task(collector.run()),
+            loop.create_task(self._idle_loop(narrator)),
+        ]
+
+    @staticmethod
+    async def _idle_loop(narrator: Narrator, interval: float = 30.0) -> None:
+        """Drive the Narrator's timer-based idle sweep (spec 04 §Step 3)."""
+        while True:
+            await asyncio.sleep(interval)
+            await narrator.tick()
+
     def _on_kill(self) -> None:
         """Control API ``kill`` handler: schedule graceful shutdown.
 
@@ -221,6 +279,11 @@ class EdithDaemon:
         # 1. stop accepting new intents: STOPPING makes Brain skip any late utterance.
         if self.state.state is not self.state.state.STOPPING:
             self.state.kill()
+
+        # 1b. cancel session-awareness background tasks (collector tail + idle loop).
+        for task in self._session_tasks:
+            task.cancel()
+        self._session_tasks = []
 
         # 2. final compact() — deferred on the real MemoryStore, so call it only
         #    if present (# TODO(compact): remove the guard once Memory.compact lands).

@@ -363,15 +363,69 @@ Populate `last_event` in the Control API `status` response (north-star §4.2) fr
 
 ---
 
-## Completion Record — Session Awareness — (not yet built)
+## Completion Record — Session Awareness — Session 15 (2026-07-09)
 
-> Fill this at session end per `../SESSION-PROTOCOL.md` §4 (canonical template lives there).
-> Leave empty until the slice is built.
+- **What shipped:** EDITH now observes every running OMC / Claude Code session on the machine
+  and narrates meaningful activity by voice, without the owner switching windows. Package
+  `edith/session/` (collector + SessionBus + narrator) + `SessionQuerySkill` + edithd wiring +
+  `python -m edith.session` live-smoke entry. The killer-demo input (a pasted DB/Airflow error)
+  is captured and redacted.
 
-- **What shipped:**
 - **How it works:**
+  1. **SPIKE first (Step 0).** `scratch/spike_session_tap.py` probed the live machine. Finding
+     (`scratch/spike_session_tap_findings.md`): tail the Claude Code transcripts under
+     `~/.claude/projects/<slug>/<sessionId>.jsonl` — append-only JSONL, per-event flush (<1 s,
+     proven against the live session's own records), owner-pasted text lands **inline** in `user`
+     records (no placeholder externalization on CC 2.1.187), every record carries
+     `sessionId`/`cwd`/`gitBranch`/`timestamp`. Hooks (`UserPromptSubmit` etc.) fire too but
+     transcript-tail wins: zero-config, cross-session, structured, + tool results.
+  2. **TranscriptCollector** — dependency-free byte-offset poller (not `watchdog`). `prime()`
+     snapshots EOF of existing transcripts so history is never replayed; new files read from 0;
+     partial trailing lines held until their newline. Dispatches each parsed record to on_record.
+  3. **SessionBus** — normalize→classify→**REDACT** (`sanitize_text` choke-point)→publish
+     `session.event {session_id,kind,summary,repo}` and `session.state {…,state,current_action,…}`.
+     Holds an in-memory redacted `session_states` map and updates the Control API `last_event`.
+     First-seen session synthesizes a `start`. `kind`∈{start,prompt,tool_use,error,stop}.
+  4. **Narrator** — three-class policy (spec §Cost/token): silent (tool_use/prompt), spoken-local
+     template (start/stop/error/idle), model-gated haiku (error summary when a Router + budget
+     allow). Idle is timer-driven via `tick()`.
+  5. **SessionQuerySkill** — owner questions ("what is session 2 doing?") routed through Brain's
+     existing dispatch (phrase triggers), reads the live states map, optionally phrases via haiku.
+  6. **edithd** wires SessionBus + SessionQuerySkill always (cheap, feeds `last_event`); the live
+     collector tail + idle loop start only when `enable_session_awareness=True` (off in tests).
+
 - **Key decisions made during build:**
+  - Transcript-tail over hooks (spike-evidenced). Dep-free polling over watchdog (viewer ethos).
+  - Hardened the `sanitize_text` choke-point with a **connection-URI password** pattern
+    (`scheme://user:PASSWORD@host`) — the exact killer-demo leak; benefits voice/brain/memory too.
+  - Owner-question path is a Skill (not a 2nd `voice.utterance` subscriber) so Brain short-circuits.
+
 - **Deviations from spec + why:**
-- **Files created / changed:**
-- **Verification / tests run + results:**
+  - Narration policy lives in a dedicated **Narrator** collaborator, not inside Brain (spec said
+    "in Brain"). It consumes different topics with its own gating and is independently testable;
+    Brain's utterance loop stays single-purpose. Behavioral verification unaffected.
+  - Collector uses **polling**, not `watchdog` (spec listed it as a candidate). ~1 s latency, zero
+    new deps. Idle/waiting implemented as a timer (`tick()`), as the spec anticipated.
+
+- **Files created / changed:** NEW `edith/session/{__init__,bus,collector,narrator,__main__}.py`,
+  `edith/skills/session_query.py`, tests `test_session_{bus,collector,narrator,query_skill}.py`,
+  `scratch/spike_session_tap{,_findings}.{py,md}`, `scratch/smoke_live_collector.py`. CHANGED
+  `edith/memory/secrets.py` (+conn-URI pattern & test), `edith/daemon/edithd.py` (wiring),
+  `edith/skills/__init__.py` (export), `tests/test_daemon_edithd.py` (+2 wiring tests).
+
+- **Verification / tests run + results:** **194 passed, 1 skipped**; ruff clean; pyright clean
+  (zero type:ignore added). 33 new tests. LIVE smoke (`scratch/smoke_live_collector.py`) over the
+  owner's REAL transcripts: 11,744 `session.event` classified from genuine records; real pasted
+  Snowflake/Postgres credentials redacted to `[REDACTED]`; **0 raw secrets survived**.
+
 - **Follow-ups / known gaps:**
+  - Live **audio** narration (speak via `[voice]` + speaker) is owner LIVE-SMOKE; the print-only
+    path (`python -m edith.session`) is verified. Full "run OMC in another window → hear it" is an
+    owner smoke.
+  - Model-gated narration is wired for the `error` kind (a v1 slice of the killer demo). The richer
+    multi-step "picked up your error, querying the DAG now" cascade summary is a follow-up.
+  - `attachment` records are ignored (inline paste path works on CC 2.1.187); reading them is the
+    graceful-degradation path if a future CC version externalizes very large pastes.
+  - Bare-shell (non-OMC/Claude) sessions produce no transcript → out of scope for v1 (per spec).
+  - Session graph persistence (durable "what was session 2 doing at 11am", the `Session` node) is
+    not wired — SessionBus is in-memory only this slice.
