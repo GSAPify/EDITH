@@ -17,6 +17,10 @@ voice = [
     "elevenlabs",
     "faster-whisper",
     "openwakeword",
+    # PIN: onnxruntime >=1.20 silently miscomputes openWakeWord's 2022-era ONNX
+    # models on macOS arm64 → every wake score collapses to ~0 (cost us a whole
+    # debugging saga). 1.18.1 detects "hey edith" at 0.91 / alexa at 1.0.
+    "onnxruntime<1.20",
     "piper-tts",
     "sounddevice",
     "numpy",
