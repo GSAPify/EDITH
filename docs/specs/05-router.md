@@ -542,15 +542,64 @@ pytest tests/router/test_latency_masking.py -v
 
 ---
 
-## Completion Record — Router — (not yet built)
+## Completion Record — Router — Session 15 (2026-07-09)
 
-> Fill this at session end per `../SESSION-PROTOCOL.md` §4 (canonical template lives there).
-> Leave empty until the slice is built.
+- **What shipped:** The single-tier passthrough became a real gateway: **tier selection**
+  (`resolve_tier` + `TaskType`), **streaming** (`model_call_stream` → `AsyncIterator[ModelChunk]`),
+  the **two-call latency-masking** mechanism (`model_call_masked` — fast ack + slower answer,
+  two overlapped calls), a **budget-gate** seam before opus, and the **redaction choke-point**
+  (`sanitize_text` inside every `model_call*`). Callers (slices 1–4) are unchanged — same
+  `model_call` surface.
 
-- **What shipped:**
 - **How it works:**
+  - `edith/router/tiers.py` (now owns the `Tier` enum, moved here to break the import cycle):
+    `resolve_tier(tier_hint, task_type, token_count, budget_allows_opus) -> TierDecision`.
+    Rules: ACK_FILLER demotes to Haiku; HAIKU hint escalates to Sonnet over `HAIKU_MAX_TOKENS`;
+    OPUS hint honored but budget-gated (deny → Sonnet + `budget_limited=True`); hint=None →
+    Sonnet (the live voice), or Haiku for small cheap lookups, and a deep signal sets
+    `suggest_background` (Sonnet holds the live turn; opus goes background — deferred).
+  - `edith/router/bifrost.py`: `Router` gains `budget_check` + `redactor` seams (default
+    allow + `sanitize_text`). `model_call` unchanged in behaviour but now redacts + resolves the
+    tier first. `model_call_stream` parses the Anthropic SSE (`content_block_delta` text +
+    `message_start`/`message_delta` usage) and yields `ModelChunk`s. `model_call_masked` fires
+    the answer as a `Task` and pumps the ack stream through a queue via a started task, so **both
+    HTTP requests are issued before either stream is drained** (true overlap, not ack-then-answer).
+
 - **Key decisions made during build:**
+  - **`model_call_masked` is tier-parameterized, answer defaults to Sonnet — NOT opus.** The spec
+    §Timeline drew "Call B: opus", but the revised §Tier-selection philosophy (Sonnet is the live
+    voice, opus never blocks) contradicts that. Per the file's own "fix the section" reminder, the
+    masker is a tier-agnostic *mechanism*; opus-in-background is `think_async` (deferred).
+  - Left the working non-streaming `model_call` POST intact; added streaming alongside rather than
+    routing everything through SSE (callers depend on the POST path; zero functional gain, real risk).
+  - Redaction moved INTO Router as the unbypassable choke-point (Brain still redacts too — safe).
+
 - **Deviations from spec + why:**
-- **Files created / changed:**
-- **Verification / tests run + results:**
+  - Build steps 7 (OpenAI provider-swap) deferred — Bifrost is Anthropic-compatible today; the
+    `BIFROST_PROVIDER` seam is config-only, no second SDK path built.
+  - `Tier` enum relocated from `bifrost.py` to `tiers.py` (import-cycle break); re-exported from
+    `edith.router`, so all callers are unaffected.
+
+- **Files created / changed:** NEW `edith/router/tiers.py`, `tests/test_router_tiers.py`,
+  `tests/test_router_stream.py`. CHANGED `edith/router/bifrost.py` (ModelChunk, streaming, masking,
+  seams; `Tier` now imported from tiers), `edith/router/__init__.py` (exports).
+
+- **Verification / tests run + results:** **212 passed, 1 skipped** (+ the router live smokes);
+  ruff + pyright clean. New: 10 tier-selection tests, 7 streaming/masking/redaction tests. Masking
+  test proves TRUE overlap (2 requests issued before draining). **LIVE-smoked: `model_call_stream`
+  against REAL Bifrost (`--run-live`) yielded real tokens with a correct final chunk** — the SSE
+  parser is verified against the actual event stream, not just the mock.
+
 - **Follow-ups / known gaps:**
+  - **`supervised_reason` / `SupervisedSession` (3-tier steerable reasoning) — NOT built.** Deeply
+    coupled to live-voice barge-in (owner-smoke) and speculative; not in the spec's ordered build
+    steps. Deferred with the contract as the seam.
+  - **`think_async` / background-opus auto-escalation — NOT built (UNMET).** This is the centerpiece
+    of the routing philosophy ("opus never blocks, goes background"); `resolve_tier` already returns
+    `suggest_background`, but nothing acts on it yet. The finder/resolve has a fire-and-forget
+    background-opus pattern to reuse. Named here as a real gap, like Guard/audio.
+  - **Masking + streaming have no live consumer yet.** The perceived-latency payoff needs
+    `VoiceIO.speak_stream` + an `edithd` composition root; the mechanics are unit- and live-tested,
+    but the end-to-end "ack audio then answer audio" is owner-smoke once those exist.
+  - **Guard** still deferred: `budget_check` defaults to allow, redaction uses `sanitize_text`.
+  - `BIFROST_MODEL_*` version pinning + OpenAI provider path: config seams, not built.
