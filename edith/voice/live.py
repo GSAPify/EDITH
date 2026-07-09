@@ -133,9 +133,10 @@ def _blocking_listen(
         while True:
             frame = _read_frame(np, stream)
             scores = wake.predict(frame)
-            # predict() returns {model: score}; guard the type (it can return a
-            # (scores, timings) tuple when timing=True, which we don't request).
-            score = scores.get(wake_model, 0.0) if isinstance(scores, dict) else 0.0
+            # predict() returns {model_name: score} — keyed by the model's NAME
+            # (e.g. "hey_edith"), NOT the path/name we passed. Only one wake model
+            # is loaded, so take the max score rather than guess the key.
+            score = max(scores.values()) if isinstance(scores, dict) and scores else 0.0
             if float(score) < wake_threshold:
                 continue
 

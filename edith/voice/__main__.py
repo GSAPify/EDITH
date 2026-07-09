@@ -53,11 +53,12 @@ async def _amain(engine: str) -> int:
 
     model = resolve_wake_model()
     phrase = wake_phrase(model)
+    threshold = float(os.environ.get("EDITH_WAKE_THRESHOLD", "0.5"))
     await voice.speak(f"Voice loop online. Say {phrase} to talk to me.")
-    print(f"[voice] wake model: {model}")
+    print(f"[voice] wake model: {model}  (threshold {threshold})")
     print(f"[voice] listening — say '{phrase}, ...'   (Ctrl-C to stop)")
     try:
-        await run_live_loop(voice, wake_model=model)
+        await run_live_loop(voice, wake_model=model, wake_threshold=threshold)
     except KeyboardInterrupt:
         print("\n[voice] stopped.")
     return 0
