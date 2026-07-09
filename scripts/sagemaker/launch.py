@@ -30,9 +30,12 @@ def main() -> None:
     # PYTHONFAULTHANDLER dumps a C-level stack on SIGSEGV/SIGABRT; pass through the
     # tiny-config overrides for a cheap diagnostic run.
     env = {"PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"}
-    for k in ("EDITH_N_SAMPLES", "EDITH_N_SAMPLES_VAL", "EDITH_STEPS"):
+    for k in ("EDITH_N_SAMPLES", "EDITH_N_SAMPLES_VAL", "EDITH_STEPS", "EDITH_TARGET_RECALL"):
         if k in os.environ:
             env[k] = os.environ[k]
+
+    # A bigger data/step run needs more wall-clock than the 3h diagnostic ceiling.
+    max_run = int(float(os.environ.get("EDITH_MAX_RUN_HOURS", "3")) * 3600)
 
     est = PyTorch(
         entry_point="train_hey_edith.py",
@@ -43,7 +46,7 @@ def main() -> None:
         instance_type=instance,
         instance_count=1,
         volume_size=100,               # 16 GB negatives + generated clips need room
-        max_run=3 * 60 * 60,           # 3h ceiling; job self-terminates on exit
+        max_run=max_run,               # self-terminates on exit; ceiling stops runaways
         base_job_name="edith-heyedith",
         sagemaker_session=sm_sess,
         disable_profiler=True,

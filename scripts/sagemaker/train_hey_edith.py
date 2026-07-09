@@ -154,7 +154,10 @@ def write_config() -> str:
     cfg["n_samples_val"] = int(os.environ.get("EDITH_N_SAMPLES_VAL", "1000"))
     cfg["steps"] = int(os.environ.get("EDITH_STEPS", "20000"))
     cfg["target_accuracy"] = 0.77
-    cfg["target_recall"] = 0.5
+    # Operating point: higher target_recall biases the chosen threshold toward
+    # catching the wake word (fewer misses) at the cost of more false positives.
+    # The recall-0.42 model missed too often; env-overridable to retune.
+    cfg["target_recall"] = float(os.environ.get("EDITH_TARGET_RECALL", "0.5"))
     cfg["piper_sample_generator_path"] = PSG
     cfg["output_dir"] = os.path.join(WORK, "my_custom_model")
     cfg["rir_paths"] = [os.path.join(WORK, "mit_rirs")]
