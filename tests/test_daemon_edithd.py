@@ -252,6 +252,62 @@ async def test_shutdown_is_safe_when_memory_has_no_compact(data_dir):
     assert memory.closed is True
 
 
+async def test_session_bus_wired_feeds_last_event(data_dir):
+    # Spec 04 §Step 5: a normalized session event surfaces in Control API status.
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+    await daemon.start()
+    try:
+        assert daemon._session_bus is not None
+        await daemon._session_bus.ingest(
+            {
+                "type": "user",
+                "sessionId": "sess-xyz",
+                "cwd": "/Users/x/gitstuff/agents",
+                "gitBranch": "master",
+                "promptSource": "typed",
+                "message": {"role": "user", "content": "fix the failing dag"},
+            }
+        )
+        resp = await ControlClient(daemon.socket_path).send({"cmd": "status"})
+    finally:
+        await daemon.stop()
+
+    status = cast(dict[str, object], resp["status"])
+    assert status["last_event"] is not None
+    assert "prompt" in str(status["last_event"])
+
+
+async def test_session_query_skill_is_dispatchable(data_dir):
+    # Spec 04 §Step 4: an owner question about sessions is answered via Brain dispatch.
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+    await daemon.start()
+    results: list[dict] = []
+
+    async def _capture(event) -> None:  # noqa: ANN001
+        results.append(event.payload)
+
+    daemon.bus.subscribe("skill.result", _capture)
+    try:
+        assert daemon._session_bus is not None
+        await daemon._session_bus.ingest(
+            {
+                "type": "user",
+                "sessionId": "sess-xyz",
+                "cwd": "/Users/x/gitstuff/agents",
+                "gitBranch": "master",
+                "promptSource": "typed",
+                "message": {"role": "user", "content": "run tests"},
+            }
+        )
+        await daemon.bus.publish(
+            "voice.utterance", source="test", payload={"text": "what's running?"}
+        )
+    finally:
+        await daemon.stop()
+
+    assert len(results) == 1  # the session_query skill handled the turn
+
+
 def test_resolve_secrets_falls_back_to_env_on_keyring_miss(monkeypatch):
     # keyring returns None (no Keychain entry) -> env vars are used. No Keychain touched.
     monkeypatch.setattr(

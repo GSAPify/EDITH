@@ -28,6 +28,13 @@ _ASSIGNMENT = re.compile(
 # PEM / private-key block headers.
 _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 
+# Credentials embedded in a connection URI: ``scheme://user:PASSWORD@host``. This
+# is the spec-04 killer-demo leak — a pasted DB error carrying a Postgres/Redis/
+# Mongo/AMQP URI with an inline password. Redact only the password group; the
+# scheme, user, and host are not secret and keep the fact legible. The password
+# run stops at the first ``@`` (real URIs percent-encode a literal ``@``).
+_CONN_URI = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]+):([^\s@/]+)@")
+
 # Provider-shaped tokens. Two families:
 #  1. PREFIXED tokens — a known prefix then the rest of the run. Covers Google
 #     client secret (GOCSPX-), OpenAI/Stripe/ElevenLabs (sk- / sk_), GitHub PATs
@@ -48,7 +55,10 @@ _TOKEN_PREFIX = re.compile(
 def contains_secret(text: str) -> bool:
     """True if ``text`` carries secret-shaped material."""
     return bool(
-        _ASSIGNMENT.search(text) or _PEM.search(text) or _TOKEN_PREFIX.search(text)
+        _ASSIGNMENT.search(text)
+        or _PEM.search(text)
+        or _TOKEN_PREFIX.search(text)
+        or _CONN_URI.search(text)
     )
 
 
@@ -60,4 +70,5 @@ def sanitize_text(text: str) -> str:
     out = _ASSIGNMENT.sub(lambda m: f"{m.group(1)}: {_REDACTED}", text)
     out = _PEM.sub(_REDACTED, out)
     out = _TOKEN_PREFIX.sub(_REDACTED, out)
+    out = _CONN_URI.sub(lambda m: f"{m.group(1)}:{_REDACTED}@", out)
     return out

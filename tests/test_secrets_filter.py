@@ -80,3 +80,23 @@ def test_broadening_does_not_over_redact_ordinary_words():
     # word-boundary-guarded prefixes must not fire on ordinary text
     for fact in ("disk_usage is high", "ask-me about the task-force skew"):
         assert sanitize_text(fact) == fact, fact
+
+
+def test_connection_uri_password_is_redacted():
+    # The spec-04 killer-demo input: a pasted DB error carrying a URI password.
+    # The password must go; scheme + user + host may stay (they're not secret).
+    uri = "postgresql://admin:hunter2SECRET@db.internal:5432/airflow"
+    out = sanitize_text(f"connection failed: {uri}")
+    assert "hunter2SECRET" not in out
+    assert "[REDACTED]" in out
+    assert "postgresql://admin:" in out and "@db.internal" in out
+
+
+def test_connection_uri_various_schemes():
+    for uri in (
+        "redis://default:pSsw0rd@cache:6379/0",
+        "mongodb+srv://u:TopSecret1@cluster0.mongodb.net",
+        "amqp://guest:guestpw@rabbit:5672",
+    ):
+        assert contains_secret(uri), uri
+        assert sanitize_text(uri).count("[REDACTED]") >= 1
