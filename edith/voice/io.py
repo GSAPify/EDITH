@@ -19,6 +19,7 @@ Wake path (_on_wake(transcript, confidence)):
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -28,6 +29,11 @@ from edith.voice.tts import TTSAdapter, TTSHandle
 
 _log = logging.getLogger(__name__)
 _CHAR_CAP = 500
+# Stuck-stream guard: if a TTS task never reports done() (e.g. a network stall on
+# the ElevenLabs stream), is_speaking must not wedge True forever or the mic goes
+# permanently deaf. Past this ceiling we abandon the handle. Generous — normal
+# 1–2 sentence replies finish in well under this.
+_MAX_SPEAK_SECONDS = 30.0
 
 
 class VoiceIO:
@@ -41,6 +47,8 @@ class VoiceIO:
         mic_source: Callable[[], Any] | None = None,
         wake_detector: Callable[[], Any] | None = None,
         stt: Callable[[], Any] | None = None,
+        max_speak_seconds: float = _MAX_SPEAK_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._bus = bus
         self._tts = tts
@@ -50,11 +58,33 @@ class VoiceIO:
         self._wake_detector = wake_detector
         self._stt = stt
         self._active_handle: TTSHandle | None = None
+        self._speak_started = 0.0
+        self._max_speak_seconds = max_speak_seconds
+        self._clock = clock
         self._paused = False
 
     def set_paused(self, paused: bool) -> None:
         """Pause or unpause utterance publishing (voice.wake still fires when paused)."""
         self._paused = paused
+
+    @property
+    def is_speaking(self) -> bool:
+        """True while TTS is (or should be) playing — the half-duplex mic gate.
+
+        The live mic loop reads this to suppress wake detection during playback so
+        EDITH never re-triggers on her own voice. Backed by the handle's ``done()``,
+        with a stuck-stream ceiling so a stalled task can't leave the mic deaf.
+        """
+        handle = self._active_handle
+        if handle is None or handle.done():
+            return False
+        if self._clock() - self._speak_started > self._max_speak_seconds:
+            # Stall guard: abandon the wedged stream so the mic reopens.
+            handle.stop()
+            self._active_handle = None
+            _log.warning("speak: abandoned a stuck TTS stream after %.0fs", self._max_speak_seconds)
+            return False
+        return True
 
     async def speak(self, text: str) -> None:
         """Redact → cap → speak via TTS adapter; retain handle for barge-in."""
@@ -64,6 +94,7 @@ class VoiceIO:
                 "speak: text truncated from %d to %d chars", len(safe_text), _CHAR_CAP
             )
             safe_text = safe_text[:_CHAR_CAP]
+        self._speak_started = self._clock()
         self._active_handle = await self._tts.speak(safe_text)
 
     async def _on_wake(self, transcript: str, confidence: float) -> None:

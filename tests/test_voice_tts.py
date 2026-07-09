@@ -21,6 +21,9 @@ class _FakeHandle:
     def stop(self) -> None:
         pass
 
+    def done(self) -> bool:
+        return True
+
 
 class _FakeAdapter(TTSAdapter):
     """Minimal TTSAdapter implementation for testing."""

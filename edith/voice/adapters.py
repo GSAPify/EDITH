@@ -55,6 +55,10 @@ class _ElevenLabsHandle:
         """Cancel the ElevenLabs streaming task immediately."""
         self._task.cancel()
 
+    def done(self) -> bool:
+        """True once the streaming task has finished or been cancelled."""
+        return self._task.done()
+
 
 class ElevenLabsAdapter(TTSAdapter):
     """Streams PCM audio from the ElevenLabs API to an audio sink.
@@ -152,6 +156,10 @@ class _PiperHandle:
         """Terminate the Piper subprocess and cancel the background drain task."""
         self._proc.terminate()
         self._task.cancel()
+
+    def done(self) -> bool:
+        """True once the drain task has finished or been cancelled."""
+        return self._task.done()
 
 
 class PiperAdapter(TTSAdapter):

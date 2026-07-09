@@ -128,11 +128,28 @@ def _blocking_listen(
     _log.info("VoiceIO live loop up: wake=%s stt=%s", wake_model, stt_model)
 
     debug = os.environ.get("EDITH_VOICE_DEBUG") == "1"
+    # Half-duplex gate: while EDITH speaks, discard mic frames; when she stops,
+    # flush the residual TTS tail and RESET the detector (the primary defense —
+    # a sub-second leaked fragment can't complete a ~1.5 s wake phrase after a
+    # reset). Flush length is env-tunable for the live retest (no recompile).
+    flush_seconds = float(os.environ.get("EDITH_SPEAK_FLUSH_SECONDS", "0.8"))
+    flush_frames = int(_SAMPLE_RATE * flush_seconds / _FRAME_SAMPLES)
+    was_speaking = False
     n_frames, peak = 0, 0.0
     with sd.RawInputStream(
         samplerate=_SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME_SAMPLES
     ) as stream:
         while True:
+            action, was_speaking = _gate_action(voice_io.is_speaking, was_speaking)
+            if action == "skip":
+                _read_frame(np, stream)  # keep draining so the input buffer can't overflow
+                continue
+            if action == "flush":
+                for _ in range(flush_frames):
+                    _read_frame(np, stream)
+                wake.reset()  # clear accumulated TTS-audio context so it can't spuriously wake
+                continue
+
             frame = _read_frame(np, stream)
             scores = wake.predict(frame)
             # predict() returns {model_name: score} — keyed by the model's NAME
@@ -163,6 +180,21 @@ def _blocking_listen(
             confidence = _confidence(seg_list)
             # Bridge onto the event loop; _on_wake does barge-in + publish.
             asyncio.run_coroutine_threadsafe(voice_io._on_wake(text, confidence), loop)  # noqa: SLF001
+
+
+def _gate_action(is_speaking: bool, was_speaking: bool) -> tuple[str, bool]:
+    """Half-duplex mic gate as a pure state machine (unit-tested; the loop is not).
+
+    Returns ``(action, next_was_speaking)`` where action is:
+      - ``"skip"``    — EDITH is speaking → discard this frame, no detection.
+      - ``"flush"``   — she just stopped → drain the TTS tail + reset the detector.
+      - ``"process"`` — idle → run normal wake detection.
+    """
+    if is_speaking:
+        return "skip", True
+    if was_speaking:
+        return "flush", False
+    return "process", False
 
 
 def _read_frame(np: Any, stream: Any) -> Any:
