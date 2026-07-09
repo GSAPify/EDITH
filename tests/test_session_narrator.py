@@ -119,6 +119,41 @@ async def test_idle_is_spoken_once_after_the_threshold() -> None:
     assert len(spk.said) == 1  # not repeated while still idle
 
 
+async def test_repeated_errors_are_throttled_per_session() -> None:
+    # Spec verification #5: model calls must be O(1-3)/session, not O(N) per error record.
+    # A burst of error events from one session collapses to a single narration until the
+    # cooldown elapses.
+    bus = EventBus()
+    spk = _Speaker()
+    router = _FakeRouter()
+    clock = _Clock()
+    _mk(bus, spk, router=router, clock=clock, error_cooldown=90)
+
+    for _ in range(10):
+        await _event(bus, session_id="s1", kind="error", summary="boom", repo="agents")
+        clock.t += 2  # rapid-fire errors, all within the cooldown window
+
+    assert len(router.calls) == 1  # only the first error narrated via model
+    assert len(spk.said) == 1
+
+    clock.t += 120  # past the cooldown → a fresh error narrates again
+    await _event(bus, session_id="s1", kind="error", summary="boom again", repo="agents")
+    assert len(router.calls) == 2
+
+
+async def test_errors_in_different_sessions_each_narrate() -> None:
+    # Throttle is per-session — two sessions erroring both get narrated.
+    bus = EventBus()
+    spk = _Speaker()
+    router = _FakeRouter()
+    clock = _Clock()
+    _mk(bus, spk, router=router, clock=clock, error_cooldown=90)
+
+    await _event(bus, session_id="s1", kind="error", summary="boom", repo="a")
+    await _event(bus, session_id="s2", kind="error", summary="boom", repo="b")
+    assert len(router.calls) == 2
+
+
 async def test_new_activity_resets_idle() -> None:
     bus = EventBus()
     spk = _Speaker()

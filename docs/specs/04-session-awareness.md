@@ -388,7 +388,8 @@ Populate `last_event` in the Control API `status` response (north-star §4.2) fr
      First-seen session synthesizes a `start`. `kind`∈{start,prompt,tool_use,error,stop}.
   4. **Narrator** — three-class policy (spec §Cost/token): silent (tool_use/prompt), spoken-local
      template (start/stop/error/idle), model-gated haiku (error summary when a Router + budget
-     allow). Idle is timer-driven via `tick()`.
+     allow). Idle is timer-driven via `tick()`. **Per-session error-narration cooldown (90 s)**
+     collapses an error cascade to one narration/model-call — the key cost gate (see #5 below).
   5. **SessionQuerySkill** — owner questions ("what is session 2 doing?") routed through Brain's
      existing dispatch (phrase triggers), reads the live states map, optionally phrases via haiku.
   6. **edithd** wires SessionBus + SessionQuerySkill always (cheap, feeds `last_event`); the live
@@ -413,10 +414,16 @@ Populate `last_event` in the Control API `status` response (north-star §4.2) fr
   `edith/memory/secrets.py` (+conn-URI pattern & test), `edith/daemon/edithd.py` (wiring),
   `edith/skills/__init__.py` (export), `tests/test_daemon_edithd.py` (+2 wiring tests).
 
-- **Verification / tests run + results:** **194 passed, 1 skipped**; ruff clean; pyright clean
-  (zero type:ignore added). 33 new tests. LIVE smoke (`scratch/smoke_live_collector.py`) over the
+- **Verification / tests run + results:** **196 passed, 1 skipped**; ruff clean; pyright clean
+  (zero type:ignore added). 35 new tests. LIVE smoke (`scratch/smoke_live_collector.py`) over the
   owner's REAL transcripts: 11,744 `session.event` classified from genuine records; real pasted
   Snowflake/Postgres credentials redacted to `[REDACTED]`; **0 raw secrets survived**.
+  - **Verification #5 (model-call frequency) — MET, and measured on real data.** Initial build
+    fired a model call on every error event (`scratch/smoke_narration_cost.py`: 452 errors → 452
+    calls, 1:1 — the O(N) burn the spec forbids). Added the per-session error cooldown → **72
+    calls over the same stream (~0.6 per session)**; in live use bounded to ~1 per 90 s per
+    session. This is an app-level rate limit; Guard's real per-window token budget remains a
+    deferred cross-cutting slice (see below).
 
 - **Follow-ups / known gaps:**
   - Live **audio** narration (speak via `[voice]` + speaker) is owner LIVE-SMOKE; the print-only
@@ -424,6 +431,9 @@ Populate `last_event` in the Control API `status` response (north-star §4.2) fr
     owner smoke.
   - Model-gated narration is wired for the `error` kind (a v1 slice of the killer demo). The richer
     multi-step "picked up your error, querying the DAG now" cascade summary is a follow-up.
+  - **Guard budget enforcement is DEFERRED** (cross-cutting slice). The Narrator's `budget_gate`
+    seam defaults to always-allow and edithd passes no gate; the per-session error cooldown is the
+    interim cost control. Wire the real per-window token budget when Guard lands.
   - `attachment` records are ignored (inline paste path works on CC 2.1.187); reading them is the
     graceful-degradation path if a future CC version externalizes very large pastes.
   - Bare-shell (non-OMC/Claude) sessions produce no transcript → out of scope for v1 (per spec).

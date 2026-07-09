@@ -58,6 +58,7 @@ class Narrator:
         budget_gate: Callable[[], bool] = lambda: True,
         clock: Callable[[], float] = time.time,
         idle_seconds: float = 120.0,
+        error_cooldown: float = 90.0,
     ) -> None:
         self._speak = speak
         self._router = router
@@ -66,6 +67,13 @@ class Narrator:
         self._budget_gate = budget_gate
         self._clock = clock
         self._idle_seconds = idle_seconds
+        # Per-session error-narration throttle (spec §Cost: "O(1) model calls per
+        # notable event, not O(N) per tool call"). Every failing tool_result is an
+        # error event, so a real session emits many; collapse a burst to one
+        # narration until the cooldown elapses. This is an app-level rate limit,
+        # NOT Guard's per-window token budget (that cross-cutting slice is deferred).
+        self._error_cooldown = error_cooldown
+        self._last_error_narration: dict[str, float] = {}
         self._last_activity: dict[str, float] = {}
         self._repo: dict[str, str | None] = {}
         self._narrated_idle: set[str] = set()
@@ -100,6 +108,15 @@ class Narrator:
             await self._narrate_error(sid, p)
 
     async def _narrate_error(self, sid: str, payload: dict[str, object]) -> None:
+        # Throttle: at most one error narration per session per cooldown window, so a
+        # cascade of failing tool_results (each an error event) does not become a
+        # cascade of model calls / spoken lines.
+        now = self._clock()
+        last = self._last_error_narration.get(sid)
+        if last is not None and now - last < self._error_cooldown:
+            return
+        self._last_error_narration[sid] = now
+
         summary = str(payload.get("summary", "an error"))
         if self._router is not None and self._budget_gate():
             # MODEL-GATED: one terse spoken line from the redacted summary.
