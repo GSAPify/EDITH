@@ -42,6 +42,24 @@ _WAKE_THRESHOLD = 0.5
 _UTTERANCE_SECONDS = 5.0  # v1: fixed capture window after wake (VAD is a follow-up)
 
 
+def resolve_wake_model() -> str:
+    """The wake model to listen for.
+
+    A bundled openWakeWord name (``hey_jarvis``, ``alexa``, …) OR a path to a
+    custom ``.onnx`` — e.g. a trained ``hey_edith`` model. ``EDITH_WAKE_MODEL``
+    overrides the default. openWakeWord does NOT ship a ``hey_edith`` model, so
+    "Hey EDITH" requires training one and pointing this at it.
+    """
+    return os.environ.get("EDITH_WAKE_MODEL", _WAKE_MODEL)
+
+
+def wake_phrase(model: str) -> str:
+    """Human phrasing of a wake model for prompts (``hey_jarvis`` → ``Hey Jarvis``)."""
+    stem = os.path.basename(model).split(".")[0]  # /x/hey_edith.onnx -> hey_edith
+    stem = stem.split("_v")[0]  # hey_jarvis_v0.1 -> hey_jarvis
+    return stem.replace("_", " ").replace("-", " ").title()
+
+
 def build_tts_adapter(
     *,
     engine: str | None = None,
@@ -51,8 +69,9 @@ def build_tts_adapter(
     """Build the configured TTS adapter from args or environment.
 
     ``TTS_ENGINE`` (default ``piper``) selects the engine; ElevenLabs also reads
-    ``ELEVENLABS_API_KEY`` / ``ELEVENLABS_VOICE_ID``. Secrets come from the env
-    (populated from Keychain / ``.env`` by the daemon) and are never logged.
+    ``ELEVENLABS_API_KEY`` / ``ELEVENLABS_VOICE_ID``, and Piper reads
+    ``PIPER_MODEL`` (path to a voice ``.onnx`` — Piper cannot run without one).
+    Secrets come from the env (Keychain / ``.env``) and are never logged.
     """
     engine = engine or os.environ.get("TTS_ENGINE", "piper")
     if engine == "elevenlabs":
@@ -61,7 +80,7 @@ def build_tts_adapter(
             api_key=api_key or os.environ.get("ELEVENLABS_API_KEY", ""),
             voice_id=voice_id or os.environ.get("ELEVENLABS_VOICE_ID", ""),
         )
-    return select_adapter(engine)
+    return select_adapter(engine, model_path=os.environ.get("PIPER_MODEL", ""))
 
 
 def build_live_voice_io(bus: EventBus, **adapter_kwargs: str) -> VoiceIO:

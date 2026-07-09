@@ -14,10 +14,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 
 from edith.bus import Event, EventBus
-from edith.voice.live import build_live_voice_io, run_live_loop
+from edith.voice.live import (
+    build_live_voice_io,
+    resolve_wake_model,
+    run_live_loop,
+    wake_phrase,
+)
 
 
 async def _amain(engine: str) -> int:
@@ -37,10 +43,21 @@ async def _amain(engine: str) -> int:
         print("Install the audio stack:  brew install portaudio && uv pip install -e '.[voice]'")
         return 1
 
-    await voice.speak("Voice loop online. Say hey Jarvis to talk to me.")
-    print("[voice] listening — say 'Hey Jarvis, ...'   (Ctrl-C to stop)")
+    # Piper needs a voice model; without one the TTS path fails silently (the
+    # runner errors in a background task). Warn clearly rather than mystify.
+    if engine == "piper" and not os.environ.get("PIPER_MODEL"):
+        print("[voice] WARNING: PIPER_MODEL is not set — Piper TTS won't speak.")
+        print("        Download a voice, e.g.:  python -m piper.download_voices en_GB-alan-medium")
+        print("        then:  export PIPER_MODEL=/path/to/en_GB-alan-medium.onnx")
+        print("        (wake + STT still work; or use --engine elevenlabs)")
+
+    model = resolve_wake_model()
+    phrase = wake_phrase(model)
+    await voice.speak(f"Voice loop online. Say {phrase} to talk to me.")
+    print(f"[voice] wake model: {model}")
+    print(f"[voice] listening — say '{phrase}, ...'   (Ctrl-C to stop)")
     try:
-        await run_live_loop(voice)
+        await run_live_loop(voice, wake_model=model)
     except KeyboardInterrupt:
         print("\n[voice] stopped.")
     return 0
