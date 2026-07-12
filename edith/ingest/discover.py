@@ -25,12 +25,19 @@ _ORIGIN_URL = re.compile(
 
 @dataclass(frozen=True)
 class DiscoveredRepo:
-    """A local clone that belongs to the patterninc org."""
+    """A repo to ingest — a local clone, or a metadata-only entry from the org API.
+
+    ``org`` is the GitHub org/workspace it belongs to. Defaults to ``patterninc``
+    (the incumbent org, whose node ids stay unprefixed for back-compat with the
+    existing graph + ``resolve.py``); other orgs get org-scoped ids so a repo name
+    shared across orgs can't collide. ``path`` is empty for metadata-only entries.
+    """
 
     name: str
     path: str
     remote: str
     last_commit_date: str
+    org: str = "patterninc"
 
 
 def discover_repos(scan_root: str | Path) -> list[DiscoveredRepo]:
