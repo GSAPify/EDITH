@@ -34,8 +34,9 @@ _CHAR_CAP = 500
 # Stuck-stream guard: if a TTS task never reports done() (e.g. a network stall on
 # the ElevenLabs stream), is_speaking must not wedge True forever or the mic goes
 # permanently deaf. Past this ceiling we abandon the handle. Generous — normal
-# 1–2 sentence replies finish in well under this.
-_MAX_SPEAK_SECONDS = 30.0
+# 1–2 sentence replies finish in well under this. Set high enough that a genuinely
+# long reply (near the 500-char cap ≈ ~40s of speech) is never wrongly abandoned.
+_MAX_SPEAK_SECONDS = 75.0
 # Half-duplex "hangover": a TTS task reports done() when the last audio chunk is
 # WRITTEN, but the output buffer keeps PLAYING for a beat after. Hold the mic gate
 # closed this many seconds past done() so the mic can't hear the tail of EDITH's

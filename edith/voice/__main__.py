@@ -37,7 +37,9 @@ _REPLY_SYSTEM = (
     "precise, dryly witty, never sycophantic. Always address him as 'sir'. He is a senior "
     "AI engineering lead, so be technical and concrete — assume fluency, skip generic "
     "hand-holding and filler like 'how can I help you'. Get straight to the substance. "
-    "Your reply is read aloud: one or two crisp spoken sentences, no markdown, no lists."
+    "Your reply is read aloud, so keep it SHORT: at most two sentences, ~40 words. If the "
+    "topic is deep, give the crisp headline and offer to go deeper — do not monologue. "
+    "No markdown, no lists."
 )
 
 
@@ -82,7 +84,7 @@ async def _amain(engine: str) -> int:
             reply = await router.model_call(
                 [{"role": "system", "content": _REPLY_SYSTEM}, {"role": "user", "content": text}],
                 Tier.SONNET,
-                max_tokens=200,
+                max_tokens=120,  # keep replies short → ~15s of speech, never near the stall ceiling
             )
         except (TimeoutError, httpx.HTTPError) as exc:
             print(f"[voice] model call failed: {exc}")
