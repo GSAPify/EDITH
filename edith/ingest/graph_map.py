@@ -24,7 +24,13 @@ _MAX_FACT_CHARS = 600
 
 
 def _repo_id(repo: DiscoveredRepo) -> str:
-    return f"repo-{repo.name}"
+    # patterninc (the incumbent org) keeps the unprefixed id so existing graph
+    # nodes + resolve.py's HIT lookup still match; every other org is scoped so a
+    # name shared across orgs (e.g. patterninc/POC-CI-Check vs ampmedia/POC-CI-Check)
+    # gets a distinct node instead of clobbering.
+    if repo.org in ("", "patterninc"):
+        return f"repo-{repo.name}"
+    return f"repo-{repo.org}-{repo.name}"
 
 
 def _fact_id(repo: DiscoveredRepo, source: str, seq: int) -> str:
@@ -57,21 +63,23 @@ def build_graph(
     edges: list[Edge] = []
     repo_id = _repo_id(repo)
 
+    # Omit empty summary/language: remember() upserts with per-prop SET, so writing
+    # "" here would BLANK a rich value on an already-ingested repo. Only set them
+    # when we actually have a value (keeps the metadata pass additive over deep runs).
+    props: dict[str, object] = {
+        "path": repo.path,
+        "remote": repo.remote,
+        "name": repo.name,
+        "org": repo.org,
+        "last_commit_date": repo.last_commit_date,
+    }
     summary = extraction.summary if extraction else ""
-    nodes.append(
-        Node(
-            "Repo",
-            repo_id,
-            {
-                "path": repo.path,
-                "remote": repo.remote,
-                "name": repo.name,
-                "last_commit_date": repo.last_commit_date,
-                "summary": summary,
-                "language": str(docs.metadata.get("primaryLanguage", "")),
-            },
-        )
-    )
+    if summary:
+        props["summary"] = summary
+    language = str(docs.metadata.get("primaryLanguage", ""))
+    if language:
+        props["language"] = language
+    nodes.append(Node("Repo", repo_id, props))
 
     learned_at = repo.last_commit_date or ""
     _add_doc_facts(nodes, edges, repo, repo_id, docs, learned_at)
@@ -143,6 +151,42 @@ def _extraction_texts(extraction: Extraction) -> list[str]:
     if extraction.stack:
         texts.append(f"Stack: {', '.join(extraction.stack)}")
     return texts
+
+
+def build_metadata_graph(
+    repo: DiscoveredRepo,
+    description: str,
+    topics: list[str],
+    language: str,
+) -> tuple[list[Node], list[Edge]]:
+    """Build the graph for one repo from GitHub API metadata only — NO model call.
+
+    The structural Repo node (org-tagged) plus a single ``gh_description`` Fact
+    carrying the description + topics (embedded for semantic recall). Deliberately
+    NOT a ``readme`` Fact (that id is reserved for a real README from the deep path)
+    and NOT ``Repo.summary`` (reserved for deep extraction) — so this pass is purely
+    additive and never clobbers a deep-ingested repo. Deep extraction happens later,
+    on demand, via ``resolve_repo``.
+    """
+    docs = RepoDocs(
+        name=repo.name, path=repo.path, readme="", claude_md="",
+        metadata={"primaryLanguage": language},
+    )
+    nodes, edges = build_graph(repo, docs, extraction=None)  # structural Repo node only
+
+    text_parts = [description.strip()]
+    if topics:
+        text_parts.append("Topics: " + ", ".join(topics))
+    text = "\n".join(p for p in text_parts if p)
+    if text:
+        repo_id = _repo_id(repo)
+        fid = _fact_id(repo, "gh_description", 0)
+        nodes.append(
+            Node("Fact", fid, {"text": _clip(text), "learned_at": repo.last_commit_date,
+                               "source": "gh_description"})
+        )
+        edges.append(Edge("relates_to", "Fact", fid, "Repo", repo_id))
+    return nodes, edges
 
 
 def map_and_remember(

@@ -37,6 +37,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", default=os.environ.get("EDITH_DATA_DIR", _DEFAULT_DATA_DIR))
     p.add_argument("--scan-root", default=_DEFAULT_SCAN_ROOT)
     p.add_argument("--max-tokens", type=int, default=512, help="Opus deep-extract cap")
+    p.add_argument(
+        "--workspace", default=None,
+        help="metadata-graph an entire GitHub org via the API (no model calls, no clones), "
+             "e.g. --workspace patterninc",
+    )
+    p.add_argument(
+        "--include-archived", action="store_true",
+        help="with --workspace: also graph archived repos (default: skip them)",
+    )
     return p
 
 
@@ -63,6 +72,20 @@ def _reembed(data_dir: str) -> int:
 async def _run(args: argparse.Namespace) -> int:
     if args.reembed:
         return _reembed(args.data_dir)
+
+    if args.workspace:
+        # Model-free metadata graph of a whole org via the GitHub API (no Bifrost).
+        from edith.ingest.workspace import ingest_workspace
+
+        report = ingest_workspace(
+            args.workspace,
+            data_dir=args.data_dir,
+            include_archived=args.include_archived,
+            names=args.repos,
+            limit=args.limit,
+        )
+        print(report.render())
+        return 0
 
     if args.dry_run:
         report = await run_ingest(

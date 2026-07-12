@@ -34,7 +34,8 @@ _NODE_SCHEMA: dict[str, str] = {
     "Repo": (
         "CREATE NODE TABLE IF NOT EXISTS "
         "Repo(id STRING PRIMARY KEY, path STRING, remote STRING, "
-        "name STRING, summary STRING, language STRING, last_commit_date STRING)"
+        "name STRING, org STRING DEFAULT '', summary STRING, language STRING, "
+        "last_commit_date STRING)"
     ),
     "Person": (
         "CREATE NODE TABLE IF NOT EXISTS "
@@ -170,6 +171,19 @@ class MemoryStore:
         columns = {str(row[1]) for row in self._rows("CALL TABLE_INFO('Person') RETURN *")}
         if "gh_handle" not in columns:
             self._run("ALTER TABLE Person ADD gh_handle STRING DEFAULT ''")
+        self._migrate_repo_org()
+
+    def _migrate_repo_org(self) -> None:
+        """Add ``Repo.org`` to a pre-existing DB and backfill the incumbent org.
+
+        The live graph predates the two-workspace change; its Repo nodes are all
+        patterninc. Guarded ALTER (idempotent), then tag any untagged rows so
+        finder/filters see the right org. A fresh DB already has the column.
+        """
+        columns = {str(row[1]) for row in self._rows("CALL TABLE_INFO('Repo') RETURN *")}
+        if "org" not in columns:
+            self._run("ALTER TABLE Repo ADD org STRING DEFAULT ''")
+        self._run("MATCH (r:Repo) WHERE r.org = '' SET r.org = 'patterninc'")
 
     def node_tables(self) -> set[str]:
         """Return the set of node-table names currently defined."""
