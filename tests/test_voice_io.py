@@ -151,17 +151,21 @@ async def test_paused_suppresses_utterance_but_not_wake() -> None:
     assert "voice.utterance" not in topics, "utterance must be suppressed while paused"
 
 
-async def test_is_speaking_reflects_handle_lifetime() -> None:
-    """is_speaking (the half-duplex mic gate) tracks the active handle's done()."""
+async def test_is_speaking_holds_through_cooldown_after_done() -> None:
+    """is_speaking stays True for the cooldown AFTER done() — the audio buffer keeps
+    playing past stream-write, so the gate must outlast done() to block the TTS tail."""
+    now = [1000.0]
     tts = _FakeTTS()
     bus, _ = _make_bus_spy()
-    vio = VoiceIO(bus=bus, tts=tts)
+    vio = VoiceIO(bus=bus, tts=tts, speak_cooldown=2.5, clock=lambda: now[0])
 
     assert vio.is_speaking is False  # nothing spoken yet
     await vio.speak("talking now")
-    assert vio.is_speaking is True  # handle live, not done
-    tts._handle._done = True  # playback finished
-    assert vio.is_speaking is False
+    assert vio.is_speaking is True  # streaming
+    tts._handle._done = True  # stream WRITTEN, but buffer still draining
+    assert vio.is_speaking is True  # cooldown holds the gate closed
+    now[0] += 3.0  # past the cooldown
+    assert vio.is_speaking is False  # gate finally opens
 
 
 async def test_stuck_stream_guard_frees_the_mic() -> None:
@@ -176,3 +180,32 @@ async def test_stuck_stream_guard_frees_the_mic() -> None:
     now[0] += 31.0  # past the stall ceiling
     assert vio.is_speaking is False  # guard released the gate
     assert tts._handle.stopped is True  # and abandoned the wedged stream
+
+
+async def test_on_wake_suppresses_self_echo() -> None:
+    """An utterance matching what EDITH just said is dropped — no barge-in, no utterance."""
+    tts = _FakeTTS()
+    bus, events = _make_bus_spy()
+    vio = VoiceIO(bus=bus, tts=tts)
+
+    await vio.speak("I'm doing great, thanks for asking!")
+    events.clear()
+
+    # The mic picks up her own tail (STT catches a fragment) → must be suppressed.
+    await vio._on_wake("I'm doing great thanks for asking", 0.75)
+    assert [e.topic for e in events] == []  # neither voice.wake nor voice.utterance fired
+    assert tts._handle.stopped is False  # echo must NOT barge-in on her own speech
+
+
+async def test_on_wake_lets_a_real_interruption_through() -> None:
+    """A genuine new utterance (not matching recent speech) is NOT treated as echo."""
+    tts = _FakeTTS()
+    bus, events = _make_bus_spy()
+    vio = VoiceIO(bus=bus, tts=tts)
+
+    await vio.speak("I'm doing great, thanks for asking!")
+    events.clear()
+
+    await vio._on_wake("what's the weather in Tokyo", 0.9)
+    topics = [e.topic for e in events]
+    assert "voice.utterance" in topics  # real query passes through

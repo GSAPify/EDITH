@@ -18,7 +18,9 @@ Wake path (_on_wake(transcript, confidence)):
 
 from __future__ import annotations
 
+import difflib
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -34,6 +36,20 @@ _CHAR_CAP = 500
 # permanently deaf. Past this ceiling we abandon the handle. Generous — normal
 # 1–2 sentence replies finish in well under this.
 _MAX_SPEAK_SECONDS = 30.0
+# Half-duplex "hangover": a TTS task reports done() when the last audio chunk is
+# WRITTEN, but the output buffer keeps PLAYING for a beat after. Hold the mic gate
+# closed this many seconds past done() so the mic can't hear the tail of EDITH's
+# own voice and false-wake on it.
+_SPEAK_COOLDOWN = 2.5
+# Echo backstop (belt to the gate's braces): a transcript recognised within this
+# window that matches something EDITH just said is her own voice leaking back.
+_ECHO_WINDOW = 20.0
+_ECHO_RATIO = 0.72
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, punctuation→space, collapse whitespace — for echo comparison."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", text.lower())).strip()
 
 
 class VoiceIO:
@@ -48,6 +64,8 @@ class VoiceIO:
         wake_detector: Callable[[], Any] | None = None,
         stt: Callable[[], Any] | None = None,
         max_speak_seconds: float = _MAX_SPEAK_SECONDS,
+        speak_cooldown: float = _SPEAK_COOLDOWN,
+        echo_window: float = _ECHO_WINDOW,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._bus = bus
@@ -60,6 +78,10 @@ class VoiceIO:
         self._active_handle: TTSHandle | None = None
         self._speak_started = 0.0
         self._max_speak_seconds = max_speak_seconds
+        self._speak_cooldown = speak_cooldown
+        self._echo_window = echo_window
+        self._speaking_until = 0.0
+        self._recent_spoken: list[tuple[float, str]] = []  # (ts, normalized text)
         self._clock = clock
         self._paused = False
 
@@ -76,15 +98,26 @@ class VoiceIO:
         with a stuck-stream ceiling so a stalled task can't leave the mic deaf.
         """
         handle = self._active_handle
-        if handle is None or handle.done():
+        now = self._clock()
+        if handle is None:
             return False
-        if self._clock() - self._speak_started > self._max_speak_seconds:
-            # Stall guard: abandon the wedged stream so the mic reopens.
-            handle.stop()
-            self._active_handle = None
-            _log.warning("speak: abandoned a stuck TTS stream after %.0fs", self._max_speak_seconds)
-            return False
-        return True
+        if not handle.done():
+            if now - self._speak_started > self._max_speak_seconds:
+                # Stall guard: abandon the wedged stream so the mic reopens.
+                handle.stop()
+                self._active_handle = None
+                _log.warning(
+                    "speak: abandoned a stuck TTS stream after %.0fs", self._max_speak_seconds
+                )
+                return False
+            self._speaking_until = now + self._speak_cooldown  # extend hangover while streaming
+            return True
+        # Stream WRITTEN but the speaker buffer is still draining: hold the gate for
+        # the cooldown so the mic never hears the tail of EDITH's own voice.
+        if now < self._speaking_until:
+            return True
+        self._active_handle = None
+        return False
 
     async def speak(self, text: str) -> None:
         """Redact → cap → speak via TTS adapter; retain handle for barge-in."""
@@ -94,7 +127,12 @@ class VoiceIO:
                 "speak: text truncated from %d to %d chars", len(safe_text), _CHAR_CAP
             )
             safe_text = safe_text[:_CHAR_CAP]
-        self._speak_started = self._clock()
+        now = self._clock()
+        self._speak_started = now
+        self._speaking_until = now + self._speak_cooldown
+        # Remember what we're about to say so a mic pickup of it can be filtered as
+        # self-echo (see _is_echo). Redacted text is fine — it's only compared, not stored.
+        self._recent_spoken.append((now, _normalize(safe_text)))
         self._active_handle = await self._tts.speak(safe_text)
 
     async def _on_wake(self, transcript: str, confidence: float) -> None:
@@ -103,6 +141,14 @@ class VoiceIO:
         Called by the wake detector seam (or directly in tests) with the
         recognised transcript and its confidence score.
         """
+        # Echo suppression FIRST (before barge-in): a transcript matching something
+        # EDITH just said is her own TTS leaking into the mic — drop it silently so it
+        # neither cuts her off (barge-in) nor loops (utterance). A real interruption
+        # won't match her recent speech, so it passes straight through.
+        if self._is_echo(transcript):
+            _log.info("voice: suppressed self-echo %r", transcript[:60])
+            return
+
         # Barge-in: stop active TTS playback before doing anything else.
         if self._active_handle is not None:
             self._active_handle.stop()
@@ -120,3 +166,26 @@ class VoiceIO:
             source="voice_io",
             payload={"text": transcript, "confidence": confidence},
         )
+
+    def _is_echo(self, transcript: str) -> bool:
+        """True if ``transcript`` is EDITH's own recent speech leaking back into the mic.
+
+        Compares (normalized) against what she said within the echo window: a containment
+        either way (STT often catches a fragment) or a high fuzzy ratio (STT is imperfect)
+        counts as an echo. Prunes stale entries as a side effect.
+        """
+        now = self._clock()
+        self._recent_spoken = [
+            (t, s) for (t, s) in self._recent_spoken if now - t <= self._echo_window
+        ]
+        cand = _normalize(transcript)
+        if not cand:
+            return False
+        for _t, spoken in self._recent_spoken:
+            if not spoken:
+                continue
+            if cand in spoken or spoken in cand:
+                return True
+            if difflib.SequenceMatcher(None, cand, spoken).ratio() >= _ECHO_RATIO:
+                return True
+        return False
