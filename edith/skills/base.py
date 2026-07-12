@@ -44,7 +44,12 @@ class SkillResult:
     a result with ``handled=False`` and falls through to the next skill / the answer
     loop. Defaults True so every existing skill is unaffected. This exists because
     broad triggers (desktop's "open "/"play ") can match an utterance the skill can't
-    actually action — without it, that turn would dead-end instead of reaching the model."""
+    actually action — without it, that turn would dead-end instead of reaching the model.
+
+    CONTRACT FOR SKILL AUTHORS: a skill that returns ``handled=False`` MUST NOT have
+    acted — no OS side-effect, no ``speak``, no shared-state write — because Brain will
+    run the next matching skill (and possibly the model) on the same utterance. Decide
+    early: classify FIRST, then either act (``handled=True``) or decline untouched."""
 
     skill: str
     findings: str = ""
