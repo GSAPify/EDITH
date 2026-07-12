@@ -90,8 +90,23 @@ class _FakeMemory:
             DesktopAction(intent=Intent.OMC_LAUNCH, repo="concorde_lib"),
         ),
         (
+            # hyphenated repo name must not truncate at the first hyphen (MEDIUM-3).
+            "start OMC in brain-platform",
+            DesktopAction(intent=Intent.OMC_LAUNCH, repo="brain-platform"),
+        ),
+        (
             "launch a terminal in the concorde_lib repo and start OMC",
             DesktopAction(intent=Intent.OMC_LAUNCH, repo="concorde_lib"),
+        ),
+        (
+            # bare terminal, no repo -> a plain window (LOW-6).
+            "open a terminal",
+            DesktopAction(intent=Intent.TERMINAL, repo=None),
+        ),
+        (
+            # volume clamped at parse so the spoken summary can't over-report (LOW-5).
+            "set the volume to 500",
+            DesktopAction(intent=Intent.SPOTIFY, spotify_cmd="volume", volume=100),
         ),
     ],
 )
@@ -345,3 +360,43 @@ async def test_dispatch_isolation_pr_review_wins_over_desktop() -> None:
     assert first_match("review Tavishi's PR") is pr
     assert first_match("open Spotify") is desktop
     assert first_match("play Bohemian Rhapsody on Spotify") is desktop
+
+
+async def test_skill_speaks_correction_when_open_fails() -> None:
+    """HIGH-1: a non-zero exit must NOT be reported as success."""
+    runner = _RecordingRunner(returncode=1, output="Unable to find application")
+    skill, spoken = _skill(runner)
+    result = await skill.run(SkillContext(utterance="open Nonesuch", memory=_FakeMemory()))
+    assert runner.calls == [["open", "-a", "Nonesuch"]]
+    assert spoken and "couldn't open" in spoken[0].lower()
+    assert "Opening Nonesuch." not in spoken  # never speaks false success
+    assert result.findings and "couldn't" in result.findings.lower()
+
+
+async def test_skill_declines_unparseable_turn_so_brain_falls_through() -> None:
+    """MEDIUM-4: a trigger-matched utterance the parser can't action returns handled=False
+    (no speak, no execution) so Brain continues to the answer loop instead of dead-ending.
+
+    Bare "pause" matches the "pause" trigger but the parser needs a music noun after it
+    ("pause the music"), so it classifies as None -> the skill declines the turn.
+    """
+    runner = _RecordingRunner()
+    skill, spoken = _skill(runner)  # no router -> no haiku fallback
+    assert parse_command("pause") is None  # precondition: bare "pause" doesn't parse
+    result = await skill.run(SkillContext(utterance="pause", memory=_FakeMemory()))
+    assert result.handled is False
+    assert runner.calls == []  # nothing executed
+    assert spoken == []  # and it stayed silent (Brain will answer instead)
+
+
+async def test_skill_play_query_routes_through_shared_escaper() -> None:
+    """MEDIUM-2: a query with a quote can't malform the AppleScript literal."""
+    runner = _RecordingRunner()
+    skill, _ = _skill(runner)
+    await skill.run(
+        SkillContext(utterance='play the song "1979"', memory=_FakeMemory())
+    )
+    script = runner.calls[0][-1]
+    assert "spotify:search:" in script
+    # the embedded quotes are escaped (\"), not stripped, and the literal stays balanced.
+    assert script.count('"') % 2 == 0

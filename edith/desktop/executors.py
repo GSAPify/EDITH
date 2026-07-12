@@ -58,7 +58,14 @@ async def open_terminal(
     run_cmd: str | None = None,
     runner: Runner = default_runner,
 ) -> tuple[int, str]:
-    """Open a Terminal.app window, ``cd`` to ``path``, optionally run ``run_cmd`` (e.g. claude)."""
+    """Open a Terminal.app window, ``cd`` to ``path``, optionally run ``run_cmd`` (e.g. claude).
+
+    SECURITY INVARIANT: ``run_cmd`` is interpolated into the shell command UNESCAPED and
+    must only ever be a hardcoded literal (today: the constant ``"claude"`` at the one call
+    site). It is NOT a command-injection sink as written, but the moment a parsed or
+    model-derived value is allowed to flow here it becomes one — quote/allowlist it then.
+    ``path`` is always a real filesystem path from RepoResolver and is ``shlex.quote``d.
+    """
     inner = f"cd {shlex.quote(str(path))}"
     if run_cmd:
         inner += f" && {run_cmd}"
@@ -70,10 +77,11 @@ def _spotify_script(cmd: str, query: str | None, volume: int | None) -> str:
     """Build the AppleScript for a Spotify transport command."""
     prefix = 'tell application "Spotify" to '
     if cmd == "play" and query:
-        # Spotify resolves spotify:search:<q> to its top match. Strip any embedded
-        # double-quotes so the AppleScript string literal stays well-formed.
-        safe = query.replace('"', "")
-        return f'{prefix}play track "spotify:search:{safe}"'
+        # Spotify resolves spotify:search:<q> to its top match. Route the whole URI
+        # through the SAME escaper the terminal path uses (backslash-then-quote) so both
+        # OS-touching paths escape identically — a query ending in a backslash or quote
+        # can't malform the AppleScript literal.
+        return f"{prefix}play track {_applescript_str('spotify:search:' + query)}"
     if cmd == "pause":
         return f"{prefix}pause"
     if cmd == "next":

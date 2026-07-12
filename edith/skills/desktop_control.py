@@ -102,9 +102,10 @@ class DesktopControlSkill:
         if action is None and self._router is not None:
             action = await self._classify_via_model(context.utterance)
         if action is None:
-            msg = "Sorry sir, I didn't catch that command."
-            await self._speak(msg)
-            return SkillResult(skill=self.name, findings=msg)
+            # A broad trigger matched but this isn't a desktop command we can action.
+            # DECLINE the turn (handled=False, no speak) so Brain falls through to the
+            # recall→answer loop instead of dead-ending on "I didn't catch that".
+            return SkillResult(skill=self.name, handled=False)
 
         if action.intent is Intent.OPEN_APP:
             return await self._open_app(action)
@@ -112,51 +113,67 @@ class DesktopControlSkill:
             return await self._spotify(action)
         return await self._terminal(action)
 
-    async def _open_app(self, action: DesktopAction) -> SkillResult:
-        app = action.app or ""
-        await launch_app(app, runner=self._runner)
-        summary = f"Opening {app}."
+    async def _speak_result(self, summary: str) -> SkillResult:
+        """Speak a summary (success or correction) and return a handled result."""
         await self._speak(summary)
         return SkillResult(skill=self.name, findings=summary)
 
+    async def _open_app(self, action: DesktopAction) -> SkillResult:
+        app = action.app or ""
+        rc, _out = await launch_app(app, runner=self._runner)
+        if rc != 0:
+            return await self._speak_result(f"Sorry sir, I couldn't open {app}.")
+        return await self._speak_result(f"Opening {app}.")
+
     async def _spotify(self, action: DesktopAction) -> SkillResult:
-        await spotify_command(
+        rc, _out = await spotify_command(
             action.spotify_cmd or "",
             query=action.query,
             volume=action.volume,
             runner=self._runner,
         )
+        if rc != 0:
+            return await self._speak_result("Sorry sir, I couldn't reach Spotify.")
         summary = {
             "play": f"Playing {action.query}.",
             "pause": "Paused.",
             "next": "Skipping ahead.",
             "volume": f"Volume set to {action.volume}.",
         }.get(action.spotify_cmd or "", "Done.")
-        await self._speak(summary)
-        return SkillResult(skill=self.name, findings=summary)
+        return await self._speak_result(summary)
 
     async def _terminal(self, action: DesktopAction) -> SkillResult:
-        try:
-            path: Path = self._resolver.resolve(action.repo or "")
-        except AmbiguousRepo as exc:
-            names = ", ".join(str(p) for p in exc.candidates)
-            ask = f"I found more than one repo matching {action.repo!r}: {names}. Which one, sir?"
-            await self._speak(ask)
-            return SkillResult(skill=self.name, asked=ask)
-        except RepoNotFound:
-            ask = f"I couldn't find a repo called {action.repo!r} under your gitstuff, sir."
-            await self._speak(ask)
-            return SkillResult(skill=self.name, asked=ask)
+        # Bare "open a terminal" (no repo) -> a plain window at home, no resolve.
+        if action.repo is None:
+            path: Path = Path.home()
+            target = "your home directory"
+        else:
+            try:
+                path = self._resolver.resolve(action.repo)
+            except AmbiguousRepo as exc:
+                names = ", ".join(str(p) for p in exc.candidates)
+                ask = (
+                    f"I found more than one repo matching {action.repo!r}: {names}. "
+                    "Which one, sir?"
+                )
+                await self._speak(ask)
+                return SkillResult(skill=self.name, asked=ask)
+            except RepoNotFound:
+                ask = f"I couldn't find a repo called {action.repo!r} under your gitstuff, sir."
+                await self._speak(ask)
+                return SkillResult(skill=self.name, asked=ask)
+            target = action.repo
 
         run_cmd = "claude" if action.intent is Intent.OMC_LAUNCH else None
-        await open_terminal(path, run_cmd=run_cmd, runner=self._runner)
+        rc, _out = await open_terminal(path, run_cmd=run_cmd, runner=self._runner)
+        if rc != 0:
+            return await self._speak_result("Sorry sir, I couldn't open the terminal.")
         summary = (
-            f"Starting OMC in {action.repo}."
+            f"Starting OMC in {target}."
             if action.intent is Intent.OMC_LAUNCH
-            else f"Terminal opened in {action.repo}."
+            else f"Terminal opened in {target}."
         )
-        await self._speak(summary)
-        return SkillResult(skill=self.name, findings=summary)
+        return await self._speak_result(summary)
 
     async def _classify_via_model(self, utterance: str) -> DesktopAction | None:
         """Haiku fallback (spec 06 §Command parsing step 2) — only when regex misses."""

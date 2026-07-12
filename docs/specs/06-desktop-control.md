@@ -452,7 +452,7 @@ uv run pytest tests/skills/test_desktop_control.py -v
   - `edith/daemon/edithd.py` (register `DesktopControlSkill` last, ~10 lines)
   - `tests/test_desktop_control.py` (new, 30 cases)
 
-- **Verification / tests run + results:** Full suite **258 passed, 2 skipped**; ruff clean;
+- **Verification / tests run + results:** Full suite **264 passed, 2 skipped**; ruff clean;
   pyright clean on all Slice-6 files (repo has 17 pre-existing pyright errors on master,
   untouched — out of scope). **Safe live checks (no side effects):** parsed all 6 spec
   canonical utterances correctly; `osacompile`d the generated Spotify + Terminal AppleScript
@@ -468,10 +468,13 @@ uv run pytest tests/skills/test_desktop_control.py -v
   - **Prefer-flat residual:** if a flat personal experiment shares a name with an org repo you
     meant, it picks the experiment. Low-probability for this layout, recoverable (wrong dir
     opens, correct it), acceptable v1.
-  - **Broad triggers:** `"open "`/`"play "` are broad; if the parser can't classify a matched
-    utterance the Skill speaks "I didn't catch that" and consumes the turn (Brain short-circuits
-    on any trigger match). Mitigated by registering desktop LAST; a real query rarely leads with
-    these verbs. Revisit if it steals real queries in practice.
+  - **Broad triggers + dead-end (FIXED in review pass):** `"open "`/`"play "` are broad. If the
+    parser can't classify a matched utterance the Skill now returns `handled=False` and Brain
+    falls through to the recall→answer loop (a new `SkillResult.handled` flag; see
+    `brain/loop.py::_dispatch_skill`). Residual: a phrase like "play devil's advocate" still
+    parses as a Spotify play (the regex can't tell media-play from figurative-play) — inherent
+    to keyword triggers without an intent classifier; accepted for v1, registered LAST to limit
+    blast radius.
   - **Haiku fallback** fires only when a Router is wired; JSON-classify is minimal (no retry).
   - **Guard** is still the deferred allow-by-default seam project-wide; this slice relies on the
     parser's AUTO-only output rather than a real authorize gate.

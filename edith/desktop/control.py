@@ -57,15 +57,19 @@ _TERMINAL_IN = re.compile(
     r"\bterminal\b.*?\b(?:in|at|inside)\s+(?:the\s+)?([\w.-]+)",
     re.IGNORECASE,
 )
+# Greedy capture — a lazy ``+?`` would stop at the first word boundary and truncate a
+# hyphenated repo name ("brain-platform" -> "brain"). ``[\w.-]`` excludes spaces, so the
+# greedy match stops cleanly at the next token; an optional trailing " repo" is dropped.
 _OMC_IN = re.compile(
-    r"\b(?:in|inside)\s+(?:the\s+)?([\w.-]+?)(?:\s+repo)?\b",
+    r"\b(?:in|inside)\s+(?:the\s+)?([\w.-]+)(?:\s+repo\b)?",
     re.IGNORECASE,
 )
+_TERMINAL_BARE = re.compile(r"\bterminal\b", re.IGNORECASE)
 _PLAY = re.compile(r"\bplay\s+(.+?)(?:\s+on\s+spotify)?\s*$", re.IGNORECASE)
 _PAUSE = re.compile(r"\b(?:pause|stop)\b.*\b(?:music|spotify|song|track|playback)\b", re.IGNORECASE)
 _NEXT = re.compile(r"\b(?:next\s+track|skip(?:\s+(?:this\s+)?(?:song|track))?)\b", re.IGNORECASE)
 _VOLUME = re.compile(r"\b(?:set\s+)?(?:the\s+)?volume\s+to\s+(\d{1,3})\b", re.IGNORECASE)
-_OPEN_APP = re.compile(r"\bopen\s+(?:the\s+)?(.+?)\s*$", re.IGNORECASE)
+_OPEN_APP = re.compile(r"\bopen\s+(?:(?:the|an?)\s+)?(.+?)\s*$", re.IGNORECASE)
 
 
 def parse_command(utterance: str) -> DesktopAction | None:
@@ -88,12 +92,18 @@ def parse_command(utterance: str) -> DesktopAction | None:
         if in_match:
             return DesktopAction(intent=Intent.OMC_LAUNCH, repo=in_match.group(1))
 
+    # Bare "open a terminal" / "new terminal" (no "in <repo>") — a plain window, no cd.
+    # Checked before the open-app fallback so it isn't read as ``open -a "a terminal"``.
+    if _TERMINAL_BARE.search(text):
+        return DesktopAction(intent=Intent.TERMINAL, repo=None)
+
     # Spotify transport (volume / next / pause before play — play is the greediest).
     vol = _VOLUME.search(text)
     if vol:
-        return DesktopAction(
-            intent=Intent.SPOTIFY, spotify_cmd="volume", volume=int(vol.group(1))
-        )
+        # Clamp at parse so the parsed value, the AppleScript, and the spoken summary
+        # all agree (the executor also clamps as a backstop).
+        volume = min(100, max(0, int(vol.group(1))))
+        return DesktopAction(intent=Intent.SPOTIFY, spotify_cmd="volume", volume=volume)
     if _NEXT.search(text):
         return DesktopAction(intent=Intent.SPOTIFY, spotify_cmd="next")
     if _PAUSE.search(text):
