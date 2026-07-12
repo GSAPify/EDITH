@@ -3,8 +3,8 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** Slices 1, 2 (PR-review), **3 (Voice)**, **4 (Session awareness)**, **5 (Router)** DONE + Viewer + Ingest + NL Finder. Next: **Slice 6 (Desktop control)** — the last numbered slice — + the daemon-integration "she talks back" gap.
-**Active slice:** → next is **Slice 6 (Desktop control)**. Slices 4 (Session awareness, PR #5 merged) + 5 (Router) built Session 15 (2026-07-09), spike/advisor-first + TDD. Router on branch `feat/slice-5-router` (PR-ready): tier selection + streaming + two-call masking + redaction choke-point; live-smoked vs real Bifrost. **Deferred in Router (UNMET, flagged):** `supervised_reason`, `think_async`/background-opus auto-escalation (the philosophy's centerpiece — `suggest_background` is returned but unacted). Masking/streaming have no live consumer until VoiceIO `speak_stream` + an `edithd` composition root exist. See spec 05 Completion Record.
+**Current phase:** Slices 0–5 DONE (Memory+Brain, PR-review, Voice, Session-awareness, Router) + Viewer + Ingest + NL-finder + **Workspace-graph (multi-org)**. **ALL PRs merged (through #10); master clean.** Next: **Slice 6 (Desktop control)** — the last numbered slice — + the daemon-integration "she talks back" gap. **See "Next action" below — it is the resume brief.**
+**Active slice:** → **Slice 6 (Desktop control).** This session (2026-07-12): built the multi-org workspace graph (1378 repos, patterninc + ampmedia, one graph, `--workspace <org>`, PR #10) + resumable cloner (`scripts/clone_workspace.sh`; 1375 repos live in `~/gitstuff/{patterninc,ampmedia}`); fixed the voice self-echo loop (half-duplex mic gate) + JARVIS persona + the wake-never-woke bug (PR #8); retrained `hey_edith` on SageMaker (recall 0.42→works, 0.767); Router Slice 5 (PR #7). "Hey Edith" now wakes + answers live.
 **Repo:** everything is on **`master`** (renamed from `main`, Session 11). All feature branches merged
 + deleted; `master` is the GitHub default. New work = branch off `master`, PR in. Full graph LIVE in
 `~/.edith/data/memory.kuzu` (206 nodes: 23 Repo, 26 Person, 12 Project, 145 Fact — embedded, no leak).
@@ -40,42 +40,56 @@ Legend: ⬜ not started · 🚧 in progress · ✅ done · ⏸ blocked
 
 ## Next action
 
-### ▶ SLICE 3 — Voice (START HERE)
-Slice 2 is done, verified, and live-smoked (see the Completion Record in `docs/specs/02-pr-review-skill.md`).
-Next is **Slice 3 (Voice)** — read `docs/specs/03-voice.md`. ElevenLabs primary + local neural fallback
-for TTS; local wake-word + STT. The bus seams already exist: Brain publishes `brain.decision` and
-skills call an injected `speak()` (currently `_silent` no-op in `edith/skills/pr_review.py`) — Slice 3
-wires a real VoiceIO to those. The confirm gate is where voice pays off: the Slice-2 `confirm` callable
-(default `_deny`) becomes a spoken "Should I post this review?" → owner voice/keyword → True/False.
+### ▶ SLICE 6 — Desktop control (START HERE — the LAST numbered slice)
+Slices 0–5 DONE (+ Viewer / Ingest / NL-finder / Workspace-graph). **All PRs merged; master is clean.**
+Next is **Slice 6** — read `docs/specs/06-desktop-control.md`. Voice-driven macOS automation shipped as
+Skill(s): open apps (`open -a`), Spotify (`osascript`), open Terminal + `cd` to a repo + launch OMC
+(spawn/own a shell). Owner: "launch a terminal in the concorde_lib repo and start OMC".
 
-**Reuse, don't rebuild:** `edith/router` (Tier.HAIKU for cheap TTS-prep/acks), `edith/skills`
-(inject a real `speak`/`confirm` in place of the `_silent`/`_deny` defaults), `edith/brain` (already
-subscribes to voice bus topics; `voice.utterance` is its input event), `edith/daemon` (VoiceIO/SessionBus
-wiring seam noted in edithd).
+**Build steps (spec §Build steps, ordered):** scaffold the `desktop_control` Skill → repo scanner →
+`CommandParser` (regex fast-path + haiku fallback → typed `DesktopAction`) → `RepoResolver`
+(fuzzy name → path) → 4 executor fns (`launch_app` / `spotify_command` / `open_terminal_window` /
+`spawn_shell_session`) → autonomy gate → bus wiring → smoke tests.
 
-**Gotchas the orchestrator MUST heed (still true):**
-- Delegated agents return a terse "Complete." — **verify independently + do a LIVE run.** Tests
-  green ≠ works (the ingest→finder embed bug passed 110 tests but returned nothing live; Slice 2's
-  agent even ended with a confused "send me the port" message — the code was fine, but only reading
-  the source + a live smoke proved it).
-- **Kuzu is single-process** → stop the viewer (`lsof -ti tcp:8765 | xargs kill`) before running
-  anything that opens `memory.kuzu` (hit this again in Slice 2's migration check).
-- Bifrost creds are in gitignored `.env` (source it: `set -a; source .env; set +a`). **KEY STILL
-  NEEDS ROTATING** (pasted in chat 2026-07-06).
-- The owner's Pattern commit identity ≠ GSAPify (author filters unreliable) → resolve people via
-  the graph + `gh pr list`, not `--author=GSAPify`.
+**Reuse, don't rebuild:** the Skill contract + Brain dispatch — copy the shape of `PRReviewSkill` /
+`SessionQuerySkill` in **`edith/skills/`** (⚠ the spec says `src/skills/` — WRONG, it's `edith/skills/`).
+`Router` `Tier.HAIKU` for the command-parse fallback; `VoiceIO.speak` for the spoken summary; the
+graph for repo resolution. **RepoResolver MUST use the per-org clone dirs `~/gitstuff/patterninc/` AND
+`~/gitstuff/ampmedia/`** (spec step-2 "walk ~/gitstuff/" is stale — clones are now in PER-ORG subdirs).
+The live graph has 1378 org-tagged `Repo` nodes but their `path=""` (metadata pass didn't clone), so
+resolve name → `~/gitstuff/<org>/<name>` on disk, or use the graph for the fuzzy match then map to disk.
 
-**Slice-2 seam for Slice 3 to grab:** `PRReviewSkill(router, *, gh, confirm, speak, org)` — `confirm`
-and `speak` are injected; the daemon wires the real voice ones. `Person.gh_handle` now exists (guarded
-migration in `MemoryStore._migrate_person_gh_handle`). Skill dispatch is `Brain(skills=[...])`; empty
-registry = pre-skill behavior.
+**Gotchas the orchestrator MUST heed:**
+- **Verify independently + do a LIVE run.** Tests green ≠ works (this project's recurring bite: the
+  wake loop passed 161 tests but never woke live — `scores.get(path)` vs `max(scores.values())`).
+- **Kuzu is single-process** → stop the viewer (`lsof -ti tcp:8765 | xargs kill`) before anything opens
+  `memory.kuzu`.
+- **Guard is still deferred** → each executor's `authorize()` is a seam defaulting to ALLOW (mirror
+  `Narrator.budget_gate` / `Router.budget_check`); do NOT build Guard here.
+- `open -a` / `osascript` / owned-shell are REAL OS side-effects → owner LIVE-SMOKE; unit-test with a
+  mocked subprocess/osascript. Autonomy: AUTO for open/launch/cd/play; ASK for destructive.
+- Bifrost creds in gitignored `.env` (`set -a; source .env; set +a`).
 
-**Deferred Slice-1 seams** (pick up when their slice needs them, not blocking Slice 2):
-`compact()` (needs Session/Conversation node tables + token-counted working buffer); **Guard**
-(`authorize`/budget — Brain redacts inline as the interim; `budget_used=0` stub in Control API);
-encrypted-volume mount (LocalSecureStore enforces 0700 dev dir); VoiceIO/SessionBus wiring
-(Brain already subscribes to their bus topics). Router two-call masking / `think_async` /
-tier heuristics = Slice 5.
+**Standing context for the new session:**
+- **"Hey Edith" WORKS now.** Retrained model at `~/.edith/models/hey_edith.onnx` (0.767 synthetic vs
+  the old 0.034; old backed up `.bak-recall042`). `.env EDITH_WAKE_MODEL` points at it. Run
+  `python -m edith.voice --engine elevenlabs` → wakes, answers via Router (Sonnet), JARVIS persona
+  (calls owner "sir"), half-duplex mic gate stops self-echo. SageMaker exec role `edith-sagemaker-exec-role`
+  left in place for future retrains.
+- **Workspace graph LIVE:** 1378 repos (1297 patterninc + 81 ampmedia), both orgs one graph, org-tagged,
+  deep-extract on-demand. Clones at `~/gitstuff/{patterninc,ampmedia}` (1375, shallow). Graph backups at
+  `~/.edith/data/*.bak-*`. `python -m edith.ingest --workspace <org>` (re-runnable, additive).
+- **Highest-payoff NON-slice gap — daemon integration ("she talks back"):** there's still no composition
+  root; EDITH only responds via the standalone `python -m edith.voice` harness, not a running `edithd`.
+  Wiring VoiceIO→Brain→Router→speak into a launchable `edithd` (`python -m edith.daemon`) is the payoff
+  that ties voice + router + session-awareness together. Consider before/after Slice 6.
+
+**Deferred seams** (pick up when a slice needs them): **Guard** (`authorize`/budget); Router
+`supervised_reason` + `think_async`/background-opus auto-escalation (the routing philosophy's centerpiece;
+`resolve_tier` returns `suggest_background` but nothing acts on it); `Memory.compact()`.
+
+**🔑 SECURITY — STILL OPEN:** rotate `ELEVENLABS_API_KEY` **and** `BIFROST_API_KEY` — both were exposed
+in `.env`/chat and used live this session.
 
 ## Blockers / needs from owner
 
