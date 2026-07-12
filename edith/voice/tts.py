@@ -26,6 +26,15 @@ class TTSHandle(Protocol):
         """Cancel active TTS playback immediately."""
         ...
 
+    def done(self) -> bool:
+        """True once playback has finished (or was stopped/cancelled).
+
+        Drives ``VoiceIO.is_speaking`` for half-duplex mic gating: the live loop
+        suppresses wake detection while a handle is still playing so EDITH never
+        hears — and re-triggers on — her own TTS.
+        """
+        ...
+
 
 class TTSAdapter(ABC):
     """Abstract base for pluggable TTS engines (spec 03 §TTS adapter interface).
