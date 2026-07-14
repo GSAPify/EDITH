@@ -124,7 +124,9 @@ async def _amain(engine: str) -> int:
             reply = await router.model_call(
                 build_messages(_REPLY_SYSTEM, history, text),
                 Tier.SONNET,
-                max_tokens=200,
+                # Keep replies short: conversation mode compounds latency (TTS +
+                # endpointing + follow-up windows), so cap tightly (spec §Gotchas).
+                max_tokens=120,
             )
         except (TimeoutError, httpx.HTTPError) as exc:
             print(f"[voice] model call failed: {exc}")

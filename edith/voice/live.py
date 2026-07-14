@@ -153,6 +153,10 @@ def _blocking_listen(
         frame_ms=_FRAME_SAMPLES / _SAMPLE_RATE * 1000.0,
     )
     was_speaking = False
+    # Only a reply to a REAL captured utterance opens the follow-up window — the
+    # startup greeting (and any unsolicited speak) must NOT arm wake-free capture,
+    # or every launch would open ~10s of ambient listening (spec §"Why NOT open-mic").
+    saw_utterance = False
     n_frames, peak = 0, 0.0
     with sd.RawInputStream(
         samplerate=_SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME_SAMPLES
@@ -166,10 +170,17 @@ def _blocking_listen(
                 for _ in range(flush_frames):
                     _read_frame(np, stream)
                 wake.reset()  # clear accumulated TTS-audio context so it can't spuriously wake
-                window.on_reply_finished()  # reply done → open the follow-up window
+                if saw_utterance:
+                    window.on_reply_finished()  # a real reply just finished → open follow-up
+                    saw_utterance = False
                 continue
 
             frame = _read_frame(np, stream)
+            # Muted: force the window closed and stop capturing (no STT on ambient
+            # audio while the owner has muted). Honors ConversationWindow.reset's contract.
+            if voice_io.is_paused:
+                window.reset()
+                continue
             scores = wake.predict(frame)  # always predict to keep the detector's buffer warm
             # predict() returns {model_name: score} — keyed by the model's NAME
             # (e.g. "hey_edith"), NOT the path/name we passed. Only one wake model
@@ -205,8 +216,22 @@ def _blocking_listen(
             if not text:
                 continue
             confidence = _confidence(seg_list)
-            # Bridge onto the event loop; _on_wake does barge-in + publish.
-            asyncio.run_coroutine_threadsafe(voice_io._on_wake(text, confidence), loop)  # noqa: SLF001
+            # A real utterance is on its way to a reply → its reply may open a
+            # follow-up window (gated in the flush branch above).
+            saw_utterance = True
+            # Bridge onto the event loop; _on_wake does barge-in + publish. Attach a
+            # done-callback so an exception inside the coroutine is logged, not swallowed.
+            fut = asyncio.run_coroutine_threadsafe(
+                voice_io._on_wake(text, confidence), loop  # noqa: SLF001
+            )
+            fut.add_done_callback(_log_future_exc)
+
+
+def _log_future_exc(fut: Any) -> None:
+    """Log an exception raised inside a bridged ``_on_wake`` coroutine (never swallow)."""
+    exc = fut.exception()
+    if exc is not None:
+        _log.error("voice: _on_wake failed", exc_info=exc)
 
 
 def _gate_action(is_speaking: bool, was_speaking: bool) -> tuple[str, bool]:

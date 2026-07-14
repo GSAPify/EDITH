@@ -133,3 +133,16 @@ Built by a 3-agent team (disjoint headless units) + lead integration, on
 - **Calibration owed:** `Endpointer` threshold (default RMS 500) needs live tuning against the
   `EDITH_VOICE_DEBUG` heartbeat; env knobs `EDITH_FOLLOWUP_SECONDS`, `EDITH_ENDPOINT_SILENCE_MS`,
   `EDITH_ENDPOINT_MAX_MS`, `EDITH_ENDPOINT_THRESHOLD` tune it with no recompile.
+  - **Wake→command pause (live-calibration watch item, from review):** capture starts at the
+    wake frame, so a long pause between "Hey Jarvis" and the command could trip the 800 ms
+    trailing-silence rule and drop the command. If it bites in smoke, bump
+    `EDITH_ENDPOINT_SILENCE_MS`, or (follow-up) start the endpointer clock on the first
+    post-wake speech frame rather than the wake frame.
+
+- **Review (code-reviewer, REQUEST_CHANGES → fixed):** startup greeting (and any unsolicited
+  `speak`) no longer opens the follow-up window — `on_reply_finished` is gated on a real preceding
+  captured utterance (`saw_utterance` latch), closing the ambient-capture-at-launch regression.
+  `ConversationWindow.reset()` is now wired: while muted (`VoiceIO.is_paused`) the loop closes the
+  window and skips capture. Bridged `_on_wake` exceptions are logged (no silent swallow).
+  `max_tokens` aligned to the documented 120. Redaction, self-echo defense, thread-safety, and
+  unbounded-growth all reviewed clean.
