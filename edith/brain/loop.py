@@ -32,6 +32,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
+from edith.brain.history import TurnBuffer
 from edith.bus import Event, EventBus
 from edith.finder import ResolveResult, ResolveStatus
 from edith.memory.secrets import sanitize_text
@@ -92,10 +93,17 @@ class Brain:
         is_paused: Callable[[], bool] = lambda: False,
         resolve_repo: ResolveRepoLike | None = None,
         skills: Sequence[Skill] | None = None,
+        history: TurnBuffer | None = None,
     ) -> None:
         self._bus = bus
         self._memory = memory
         self._router = router
+        # Recent-turns buffer (spec 03 §Conversation memory — literal half).
+        # Default None -> no splicing, no add: behaviour identical to the
+        # pre-buffer loop, so every existing test stays green. When wired, prior
+        # turns are spliced between the system message and the new utterance, and
+        # the exchange trails the model call.
+        self._history = history
         # Skill registry (spec 02). Default None -> empty list, so a Brain with
         # no skills behaves exactly as the pre-skill loop (existing tests green),
         # mirroring the resolve_repo=None no-op pattern.
@@ -142,11 +150,31 @@ class Brain:
         messages = _assemble(utterance, recalled)
         safe_messages = _redact(messages)
 
+        # 3b. HISTORY (spec 03 §Conversation memory): splice the recent-turns
+        # buffer BETWEEN the system message and the current utterance, so the
+        # model sees prior turns and then the new question. Buffer content was
+        # already sanitized at add() time; rebuild the dicts through an
+        # explicitly-typed literal so the invariant dict[str, object] target is
+        # satisfied without a cast.
+        if self._history is not None:
+            history_messages: list[dict[str, object]] = [
+                {"role": turn["role"], "content": turn["content"]}
+                for turn in self._history.messages()
+            ]
+            safe_messages = [safe_messages[0], *history_messages, *safe_messages[1:]]
+
         # 4. DECIDE (single-tier passthrough)
         response = await self._router.model_call(safe_messages, _DEFAULT_TIER)
 
         # 5. REMEMBER the exchange (never-persist filter runs again inside remember)
         self._remember_exchange(utterance, response.text)
+
+        # 5b. TRAIL the exchange into the recent-turns buffer AFTER the model call
+        # (so the buffer holds prior turns, never the in-flight one). Redact with
+        # the same never-persist filter as _remember_exchange before storing.
+        if self._history is not None:
+            self._history.add("user", sanitize_text(utterance))
+            self._history.add("assistant", sanitize_text(response.text))
 
         # 6. PUBLISH the decision
         await self._bus.publish(

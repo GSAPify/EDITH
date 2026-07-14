@@ -20,11 +20,15 @@ import argparse
 import asyncio
 import os
 import sys
+import threading
 
 import httpx
 
+from edith.brain.history import TurnBuffer
 from edith.bus import Event, EventBus
+from edith.memory.secrets import sanitize_text
 from edith.router import Router, Tier
+from edith.voice.io import VoiceIO
 from edith.voice.live import (
     build_live_voice_io,
     resolve_wake_model,
@@ -39,6 +43,39 @@ _REPLY_SYSTEM = (
     "hand-holding and filler like 'how can I help you'. Get straight to the substance. "
     "Your reply is read aloud: one or two crisp spoken sentences, no markdown, no lists."
 )
+
+
+def build_messages(system: str, history: TurnBuffer, text: str) -> list[dict[str, object]]:
+    """System preamble + the recent-turns buffer + the new utterance (spec conv-mode §3).
+
+    The buffer gives EDITH the LITERAL prior turns so a follow-up ("and what about X?")
+    resolves without the owner re-stating context. Rebuild each turn dict through an
+    explicitly-typed literal so the ``list[dict[str, object]]`` target is satisfied
+    (a ``dict[str, str]`` is not assignable under invariance). Pure — the one piece of
+    harness logic that is unit-tested; everything else here is owner live-smoke.
+    """
+    messages: list[dict[str, object]] = [{"role": "system", "content": system}]
+    messages.extend({"role": t["role"], "content": t["content"]} for t in history.messages())
+    messages.append({"role": "user", "content": text})
+    return messages
+
+
+def _start_mute_toggle(voice: VoiceIO) -> None:
+    """Owner mute: type ``m``+enter to toggle. Reuses VoiceIO.set_paused (spec conv-mode §4).
+
+    Runs a daemon stdin reader so it never blocks the audio loop. ``set_paused(True)``
+    suppresses utterances (voice.wake still fires) — the spec's reuse, not a new surface.
+    """
+    state = {"muted": False}
+
+    def _loop() -> None:
+        for line in sys.stdin:
+            if line.strip().lower() in ("m", "mute"):
+                state["muted"] = not state["muted"]
+                voice.set_paused(state["muted"])
+                print(f"[voice] {'MUTED' if state['muted'] else 'live'} — m+enter to toggle")
+
+    threading.Thread(target=_loop, daemon=True).start()
 
 
 def _build_router() -> Router | None:
@@ -67,6 +104,11 @@ async def _amain(engine: str) -> int:
         return 1
 
     router = _build_router()
+    # In-session recent-turns buffer — the LITERAL half of cross-turn memory (spec
+    # conv-mode §3). Semantic/graph recall stays deferred to the edithd composition
+    # root (see STATE "daemon-integration gap"); this harness keeps the sir-persona
+    # direct call and just remembers the conversation so far.
+    history = TurnBuffer()
 
     async def _on_utterance(event: Event) -> None:
         text = str(event.payload.get("text", ""))
@@ -80,7 +122,7 @@ async def _amain(engine: str) -> int:
         # Router redacts + tier-selects internally (Slice 5); Sonnet is the live voice.
         try:
             reply = await router.model_call(
-                [{"role": "system", "content": _REPLY_SYSTEM}, {"role": "user", "content": text}],
+                build_messages(_REPLY_SYSTEM, history, text),
                 Tier.SONNET,
                 max_tokens=200,
             )
@@ -90,8 +132,13 @@ async def _amain(engine: str) -> int:
             return
         print(f"[edith] {reply.text!r}")
         await voice.speak(reply.text)
+        # Trail the exchange into the buffer AFTER the reply — redact first (STT text
+        # flows straight in), matching Brain's never-persist boundary.
+        history.add("user", sanitize_text(text))
+        history.add("assistant", sanitize_text(reply.text))
 
     bus.subscribe("voice.utterance", _on_utterance)
+    _start_mute_toggle(voice)
 
     if engine == "piper" and not os.environ.get("PIPER_MODEL"):
         print("[voice] WARNING: PIPER_MODEL is not set — Piper TTS won't speak.")
@@ -102,12 +149,17 @@ async def _amain(engine: str) -> int:
     model = resolve_wake_model()
     phrase = wake_phrase(model)
     threshold = float(os.environ.get("EDITH_WAKE_THRESHOLD", "0.5"))
+    followup = float(os.environ.get("EDITH_FOLLOWUP_SECONDS", "10.0"))
     await voice.speak(f"Voice loop online. Say {phrase} to talk to me.")
     print(f"[voice] wake model: {model}  (threshold {threshold})")
     print(f"[voice] replies: {'ON (Bifrost)' if router else 'OFF (no creds)'}")
-    print(f"[voice] listening — say '{phrase}, ...'   (Ctrl-C to stop)")
+    print(f"[voice] conversation mode: follow-ups accepted for {followup:.0f}s after a reply "
+          "(no wake word); pauses no longer cut you off")
+    print(f"[voice] listening — say '{phrase}, ...'   (m+enter = mute, Ctrl-C to stop)")
     try:
-        await run_live_loop(voice, wake_model=model, wake_threshold=threshold)
+        await run_live_loop(
+            voice, wake_model=model, wake_threshold=threshold, followup_seconds=followup
+        )
     except KeyboardInterrupt:
         print("\n[voice] stopped.")
     return 0

@@ -88,3 +88,48 @@ Revisit only after conversation mode proves out.
 - Kuzu single-process (above). Guard still deferred (authorize/budget are allow-by-default seams).
 - Keep replies SHORT (already enforced: ≤2 sentences, max_tokens 120) — long TTS + endpointing +
   follow-up windows compound latency.
+
+---
+
+## Build record — 2026-07-14 (Session 17, team fan-out)
+
+Built by a 3-agent team (disjoint headless units) + lead integration, on
+`feat/voice-conversation-mode` off `master`.
+
+- **What shipped (all 4 components):**
+  1. **Conversation memory** — `edith/brain/history.py::TurnBuffer` (rolling last-6 turns) +
+     an optional `history` seam in `Brain` (splices prior turns between system and utterance,
+     trails the exchange, redacts). The **voice harness** (`edith/voice/__main__.py`) uses
+     `TurnBuffer` directly via a new pure `build_messages(system, history, text)` helper, so a
+     follow-up ("and what about X?") resolves with the prior turn — while keeping the JARVIS
+     "sir" persona and the direct sir-tuned model call.
+  2. **Follow-up window** — `edith/voice/conversation.py::ConversationWindow` (pure IDLE↔CONVERSING
+     state machine + timer). Wired into `live.py`: after a reply finishes (`_gate_action`→"flush")
+     the window opens; while open, speech ENERGY starts an utterance with NO wake word.
+  3. **Silence endpointing** — `edith/voice/endpointing.py::Endpointer` (energy/RMS + trailing-silence
+     run, hard-max cap). Replaces the fixed 5 s capture in `live.py` (`_capture_endpointed`), so a
+     pause no longer cuts the owner off.
+  4. **Mute toggle** — `_start_mute_toggle` in the harness: `m`+enter toggles `VoiceIO.set_paused`
+     (spec §4 reuse, daemon stdin thread).
+
+- **Key decision (advisor-backed):** conversation memory is wired via the **in-session `TurnBuffer`
+  in the standalone harness**, NOT by routing the harness through `Brain`+real Kuzu. Routing through
+  Brain only earns its keep with the real store, and opening Kuzu from `__main__` re-introduces the
+  multi-owner DB anti-pattern STATE.md warns against. So Brain's `history` splice is a **tested seam**
+  the `edithd` composition root consumes next (see Deferred).
+
+- **Verification:** full suite green + ruff + pyright clean. Headless-tested: `TurnBuffer`,
+  `Brain` multi-turn context (turn 2 sees turn 1), `ConversationWindow`, `Endpointer` (incl. the
+  "a pause shorter than silence_ms does NOT end" property), and `build_messages` ordering. The
+  `live.py` wiring (follow-up onset, endpointed capture, flush→on_reply_finished) is **owner
+  LIVE-SMOKE only** — the decision logic it calls is unit-tested, but the audio path is not.
+
+- **DEFERRED (explicit next task):** **route the voice path through `Brain` + the real
+  `VectorMemoryStore` in the `edithd` composition root** — this adds semantic/graph recall +
+  cross-session `remember()` on top of the in-session buffer, at the correct single-owner venue.
+  This is the long-standing "she talks back / daemon-integration gap." Brain's `history` seam and
+  `TurnBuffer` are already built and tested for it.
+
+- **Calibration owed:** `Endpointer` threshold (default RMS 500) needs live tuning against the
+  `EDITH_VOICE_DEBUG` heartbeat; env knobs `EDITH_FOLLOWUP_SECONDS`, `EDITH_ENDPOINT_SILENCE_MS`,
+  `EDITH_ENDPOINT_MAX_MS`, `EDITH_ENDPOINT_THRESHOLD` tune it with no recompile.

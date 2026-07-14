@@ -12,10 +12,11 @@ ElevenLabs) an API key + network. Every heavy import (``sounddevice``,
 
 **Status: written against the installed SDK APIs (elevenlabs 2.56, openwakeword,
 faster-whisper, sounddevice 0.5), NOT run against real hardware.** Expect to
-debug on first live use — this is the owner live-smoke surface. Known v1
-simplifications, documented inline: fixed-window utterance capture (not energy
-VAD), and barge-in fires when ``_on_wake`` runs (after capture) rather than at
-the instant of wake-word detection.
+debug on first live use — this is the owner live-smoke surface. The conversation-mode
+wiring below (follow-up window + energy endpointing) is likewise owner-smoke-only; the
+DECISION logic it calls lives in tested pure units (``ConversationWindow`` in
+``conversation.py``, ``Endpointer`` in ``endpointing.py``). Barge-in still fires when
+``_on_wake`` runs (after capture) rather than at the instant of wake-word detection.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from typing import Any
 
 from edith.bus import EventBus
 from edith.voice.adapters import select_adapter
+from edith.voice.conversation import ConversationWindow
+from edith.voice.endpointing import Endpointer
 from edith.voice.io import VoiceIO
 from edith.voice.tts import TTSAdapter
 
@@ -39,7 +42,12 @@ _SAMPLE_RATE = 16000
 _FRAME_SAMPLES = 1280
 _WAKE_MODEL = "hey_jarvis"  # openWakeWord bundles hey_jarvis_v0.1.onnx
 _WAKE_THRESHOLD = 0.5
-_UTTERANCE_SECONDS = 5.0  # v1: fixed capture window after wake (VAD is a follow-up)
+_FOLLOWUP_SECONDS = 10.0  # mic stays hot this long after a reply (follow-up, no wake)
+# Energy endpointing (replaces the old fixed 5 s capture): end an utterance on
+# trailing silence or a hard cap. Env-tunable for live calibration (no recompile).
+_ENDPOINT_SILENCE_MS = 800.0
+_ENDPOINT_MAX_MS = 15000.0
+_ENDPOINT_THRESHOLD = 500.0  # RMS onset/silence threshold — CALIBRATE via EDITH_VOICE_DEBUG
 
 
 def resolve_wake_model() -> str:
@@ -94,9 +102,9 @@ async def run_live_loop(
     wake_model: str = _WAKE_MODEL,
     wake_threshold: float = _WAKE_THRESHOLD,
     stt_model: str = "small.en",
-    utterance_seconds: float = _UTTERANCE_SECONDS,
+    followup_seconds: float = _FOLLOWUP_SECONDS,
 ) -> None:
-    """Always-listening loop: mic → wake → STT → ``voice_io`` publish.
+    """Always-listening loop: mic → (wake | follow-up) → endpointed STT → publish.
 
     Runs the blocking audio loop in a worker thread and bridges each recognised
     utterance back onto the event loop via ``run_coroutine_threadsafe``. Blocks
@@ -104,7 +112,7 @@ async def run_live_loop(
     """
     loop = asyncio.get_running_loop()
     await asyncio.to_thread(
-        _blocking_listen, voice_io, loop, wake_model, wake_threshold, stt_model, utterance_seconds
+        _blocking_listen, voice_io, loop, wake_model, wake_threshold, stt_model, followup_seconds
     )
 
 
@@ -114,7 +122,7 @@ def _blocking_listen(
     wake_model: str,
     wake_threshold: float,
     stt_model: str,
-    utterance_seconds: float,
+    followup_seconds: float,
 ) -> None:
     """The blocking mic loop — runs in a worker thread (heavy imports here)."""
     import numpy as np
@@ -124,7 +132,6 @@ def _blocking_listen(
 
     wake = Model(wakeword_models=[wake_model])
     stt = WhisperModel(stt_model, device="cpu", compute_type="int8")
-    frames_per_utterance = int(_SAMPLE_RATE * utterance_seconds / _FRAME_SAMPLES)
     _log.info("VoiceIO live loop up: wake=%s stt=%s", wake_model, stt_model)
 
     debug = os.environ.get("EDITH_VOICE_DEBUG") == "1"
@@ -134,6 +141,17 @@ def _blocking_listen(
     # reset). Flush length is env-tunable for the live retest (no recompile).
     flush_seconds = float(os.environ.get("EDITH_SPEAK_FLUSH_SECONDS", "0.8"))
     flush_frames = int(_SAMPLE_RATE * flush_seconds / _FRAME_SAMPLES)
+    # Conversation mode: after a reply, accept a follow-up (no wake word) for a
+    # window; end each utterance on trailing silence instead of a fixed clock. Both
+    # are pure, unit-tested units — this loop only feeds them frames.
+    window = ConversationWindow(window_seconds=followup_seconds)
+    endpoint_threshold = float(os.environ.get("EDITH_ENDPOINT_THRESHOLD", str(_ENDPOINT_THRESHOLD)))
+    endpointer = Endpointer(
+        silence_ms=float(os.environ.get("EDITH_ENDPOINT_SILENCE_MS", str(_ENDPOINT_SILENCE_MS))),
+        hard_max_ms=float(os.environ.get("EDITH_ENDPOINT_MAX_MS", str(_ENDPOINT_MAX_MS))),
+        threshold=endpoint_threshold,
+        frame_ms=_FRAME_SAMPLES / _SAMPLE_RATE * 1000.0,
+    )
     was_speaking = False
     n_frames, peak = 0, 0.0
     with sd.RawInputStream(
@@ -148,29 +166,38 @@ def _blocking_listen(
                 for _ in range(flush_frames):
                     _read_frame(np, stream)
                 wake.reset()  # clear accumulated TTS-audio context so it can't spuriously wake
+                window.on_reply_finished()  # reply done → open the follow-up window
                 continue
 
             frame = _read_frame(np, stream)
-            scores = wake.predict(frame)
+            scores = wake.predict(frame)  # always predict to keep the detector's buffer warm
             # predict() returns {model_name: score} — keyed by the model's NAME
             # (e.g. "hey_edith"), NOT the path/name we passed. Only one wake model
             # is loaded, so take the max score rather than guess the key.
             score = max(scores.values()) if isinstance(scores, dict) and scores else 0.0
+            rms = _frame_rms(np, frame)
             if debug:
                 # ~1 s heartbeat: mic level (rms) tells us if audio is arriving at
                 # all; peak wake score tells us how close we are to the threshold.
                 n_frames += 1
                 peak = max(peak, float(score))
                 if n_frames % 12 == 0:
-                    rms = float(np.sqrt(np.mean(np.square(frame.astype(np.float32)))))
                     print(f"[debug] mic_rms={rms:8.1f}  peak_wake_score={peak:.3f}"
-                          f"  (threshold {wake_threshold})", flush=True)
+                          f"  (wake {wake_threshold}, endpoint {endpoint_threshold})", flush=True)
                     peak = 0.0
-            if float(score) < wake_threshold:
+
+            # Trigger: inside the follow-up window, speech ENERGY starts an utterance
+            # (no wake word); otherwise the wake score must clear the threshold.
+            if window.accepts_followup():
+                triggered = rms >= endpoint_threshold
+            else:
+                triggered = float(score) >= wake_threshold
+            if not triggered:
                 continue
 
-            # Wake detected — capture a fixed window, transcribe, hand to VoiceIO.
-            pcm = _capture_utterance(np, stream, frames_per_utterance)
+            window.on_utterance()  # a real utterance is starting → keep the window hot
+            # Capture until trailing silence (endpointed), transcribe, hand to VoiceIO.
+            pcm = _capture_endpointed(np, stream, endpointer, frame)
             audio = pcm.astype(np.float32) / 32768.0
             segments, _info = stt.transcribe(audio, vad_filter=True)
             seg_list = list(segments)
@@ -203,10 +230,27 @@ def _read_frame(np: Any, stream: Any) -> Any:
     return np.frombuffer(bytes(data), dtype=np.int16)
 
 
-def _capture_utterance(np: Any, stream: Any, frames: int) -> Any:
-    """Read a fixed-length int16 PCM window (v1: no energy VAD, see module note)."""
-    chunks = [_read_frame(np, stream) for _ in range(max(frames, 1))]
-    return np.concatenate(chunks)
+def _frame_rms(np: Any, frame: Any) -> float:
+    """Root-mean-square energy of an int16 PCM frame (the endpointer's input)."""
+    return float(np.sqrt(np.mean(np.square(frame.astype(np.float32)))))
+
+
+def _capture_endpointed(np: Any, stream: Any, endpointer: Endpointer, first_frame: Any) -> Any:
+    """Read frames until the endpointer says the utterance ended (trailing silence / hard max).
+
+    Starts from ``first_frame`` (the onset frame that triggered capture) so no speech is
+    clipped, then feeds each frame's RMS to the pure ``Endpointer``. Owner-smoke only; the
+    end-decision logic is unit-tested in test_voice_endpointing.py.
+    """
+    endpointer.reset()
+    chunks = [first_frame]
+    if endpointer.feed(_frame_rms(np, first_frame)):
+        return np.concatenate(chunks)
+    while True:
+        frame = _read_frame(np, stream)
+        chunks.append(frame)
+        if endpointer.feed(_frame_rms(np, frame)):
+            return np.concatenate(chunks)
 
 
 def _confidence(segments: list[Any]) -> float:
