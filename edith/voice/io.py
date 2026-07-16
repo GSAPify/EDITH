@@ -90,6 +90,15 @@ class VoiceIO:
         self._paused = paused
 
     @property
+    def is_paused(self) -> bool:
+        """Whether utterance publishing is muted (read side of ``set_paused``).
+
+        The live loop reads this to close the follow-up window and stop capturing
+        while muted, so a muted owner doesn't run STT on ambient audio.
+        """
+        return self._paused
+
+    @property
     def is_speaking(self) -> bool:
         """True while TTS is (or should be) playing — the half-duplex mic gate.
 

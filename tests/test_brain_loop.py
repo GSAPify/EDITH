@@ -16,6 +16,7 @@ proven without any live model call. Assertions:
 from __future__ import annotations
 
 from edith.brain import Brain
+from edith.brain.history import TurnBuffer
 from edith.bus import Event, EventBus
 from edith.router import ModelResponse, Tier
 
@@ -137,3 +138,47 @@ async def test_redaction_runs_before_the_model_call():
         str(getattr(n, "props", {}).get("text", "")) for n in memory.remembered_nodes
     )
     assert secret not in remembered_text
+
+
+async def test_history_buffer_carries_prior_turn_into_next_call():
+    bus = EventBus()
+    memory = FakeMemory()
+    router = FakeRouter(answer="The Kuzu graph store.")
+    Brain(bus=bus, memory=memory, router=router, history=TurnBuffer())
+
+    # Turn 1: nothing prior, so the first model_call has NO history spliced.
+    await _run_utterance(bus=bus, text="what store does EDITH use for memory?")
+    # Turn 2: a tight follow-up that only makes sense with turn 1 in context.
+    await _run_utterance(bus=bus, text="and what about its query language?")
+
+    assert len(router.calls) == 2
+
+    first_messages, _ = router.calls[0]
+    first_blob = " ".join(str(m.get("content", "")) for m in first_messages)
+    # Non-vacuous: the FIRST call cannot contain turn-1's answer or turn-2's text.
+    assert "The Kuzu graph store." not in first_blob
+    assert "and what about its query language?" not in first_blob
+
+    second_messages, _ = router.calls[1]
+    second_blob = " ".join(str(m.get("content", "")) for m in second_messages)
+    # Turn 2 sees turn 1: both the prior utterance and the prior answer are present.
+    assert "what store does EDITH use for memory?" in second_blob
+    assert "The Kuzu graph store." in second_blob
+    # …and the new utterance is still there, spliced AFTER the history.
+    assert "and what about its query language?" in second_blob
+
+
+async def test_history_none_default_leaves_first_call_unchanged():
+    bus = EventBus()
+    memory = FakeMemory()
+    router = FakeRouter(answer="ok")
+    Brain(bus=bus, memory=memory, router=router)  # no history arg
+
+    await _run_utterance(bus=bus, text="turn one")
+    await _run_utterance(bus=bus, text="turn two")
+
+    # Without a buffer, the second call carries only [system, user] — no prior turn.
+    second_messages, _ = router.calls[1]
+    assert [m["role"] for m in second_messages] == ["system", "user"]
+    second_blob = " ".join(str(m.get("content", "")) for m in second_messages)
+    assert "turn one" not in second_blob
