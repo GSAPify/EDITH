@@ -47,7 +47,7 @@ from edith.memory.store import MemoryStore
 from edith.session.bus import SessionBus
 from edith.session.collector import TranscriptCollector
 from edith.session.narrator import Narrator
-from edith.skills import PRReviewSkill, SessionQuerySkill
+from edith.skills import DesktopControlSkill, PRReviewSkill, SessionQuerySkill
 
 _KEYRING_SERVICE = "edithd"
 _SOCKET_NAME = "edithd.sock"
@@ -188,13 +188,22 @@ class EdithDaemon:
             if speak is not None
             else SessionQuerySkill(self._session_bus.session_states, router=self._router)
         )
+        # DesktopControlSkill turns "open Spotify" / "start OMC in <repo>" into real OS
+        # actions (spec 06). Registered LAST: its triggers are broad ("open ", "play "),
+        # so the more specific pr-review / session skills claim their turns first. Speak
+        # feedback when VoiceIO is wired; the router enables the haiku classify fallback.
+        desktop_skill = (
+            DesktopControlSkill(router=self._router, speak=speak)
+            if speak is not None
+            else DesktopControlSkill(router=self._router)
+        )
         self._brain = Brain(
             bus=self.bus,
             memory=self._memory,
             router=self._router,
             is_paused=lambda: self.state.is_paused,
             resolve_repo=resolver,
-            skills=[pr_skill, session_skill],
+            skills=[pr_skill, session_skill, desktop_skill],
         )
 
         # Live transcript tap + idle narration — only when explicitly enabled.
