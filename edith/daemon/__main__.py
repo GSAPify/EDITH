@@ -31,13 +31,15 @@ from edith.router import Router, Tier
 _DEFAULT_DATA_DIR = "~/.edith/data"
 
 
-def _build_router(base_url: str, api_key: str) -> Router:
+def _build_router(client: httpx.AsyncClient, api_key: str) -> Router:
+    # NOTE: Bifrost model ids are duplicated from edith.voice.__main__ — a drift risk
+    # (owner guardrail on stale hardcoded constants). TODO(config): centralize a
+    # tier→model map both entry points read.
     models = {
         Tier.HAIKU: os.environ.get("BIFROST_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
         Tier.SONNET: os.environ.get("BIFROST_MODEL_SONNET", "claude-sonnet-4-6"),
         Tier.OPUS: os.environ.get("BIFROST_MODEL_OPUS", "claude-opus-4-8"),
     }
-    client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
     return Router(client, api_key, models)
 
 
@@ -60,7 +62,8 @@ async def _amain(engine: str, data_dir: str) -> int:
 
     expanded = os.path.expanduser(data_dir)
     store = VectorMemoryStore(os.path.join(expanded, "memory.kuzu"))
-    router = _build_router(secrets.bifrost_base_url, secrets.bifrost_api_key)
+    client = httpx.AsyncClient(base_url=secrets.bifrost_base_url, timeout=30.0)
+    router = _build_router(client, secrets.bifrost_api_key)
 
     daemon = EdithDaemon(
         expanded,
@@ -81,6 +84,7 @@ async def _amain(engine: str, data_dir: str) -> int:
         pass
     finally:
         await daemon.stop()
+        await client.aclose()  # close the HTTP client we opened (no leaked connections)
     print("\n[edithd] stopped.")
     return 0
 

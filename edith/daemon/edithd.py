@@ -218,7 +218,10 @@ class EdithDaemon:
             bus=self.bus,
             memory=self._memory,
             router=self._router,
-            is_paused=lambda: self.state.is_paused,
+            # Skip a pass while PAUSED (privacy) OR STOPPING — the latter makes the
+            # docstring's "STOPPING blocks Brain" real and prevents a late mic
+            # utterance from running recall/remember against a closing Kuzu handle.
+            is_paused=lambda: self.state.is_paused or self.state.is_stopping,
             resolve_repo=resolver,
             skills=[pr_skill, session_skill, desktop_skill],
             history=TurnBuffer() if voiced else None,
