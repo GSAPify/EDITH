@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from edith.memory.store import Node
+from edith.memory.store import Edge, Node
 
 
 class MemoryLike(Protocol):
@@ -23,7 +23,7 @@ class MemoryLike(Protocol):
     def recall(self, query: str) -> list[dict[str, object]]: ...
 
     def remember(
-        self, nodes: list[Node] | None = None, edges: list[object] | None = None
+        self, nodes: list[Node] | None = None, edges: list[Edge] | None = None
     ) -> None: ...
 
 

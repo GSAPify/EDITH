@@ -195,7 +195,7 @@ class PRReviewSkill:
             ),
             Node("Fact", fact_id, {"text": summary, "source": "pr-review", "learned_at": ""}),
         ]
-        edges: list[object] = [
+        edges: list[Edge] = [
             Edge("reviewed_by", "PR", pr_id, "Person", person_id),
             Edge("relates_to", "Fact", fact_id, "PR", pr_id),
         ]

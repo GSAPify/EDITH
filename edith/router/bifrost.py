@@ -38,6 +38,12 @@ from edith.router.tiers import TaskType, Tier, estimate_tokens, resolve_tier
 _ANTHROPIC_VERSION = "2023-06-01"
 _DEFAULT_MAX_TOKENS = 1024
 
+# The transport errors a ``model_call*`` can raise after tenacity exhausts its
+# retries. Exported so callers (Brain, the voice harness) can catch the router's
+# declared failure contract without importing httpx themselves — a specific catch,
+# not a bare except. httpx.HTTPError covers TransportError + HTTPStatusError.
+MODEL_CALL_ERRORS: tuple[type[Exception], ...] = (TimeoutError, httpx.HTTPError)
+
 # Seams for the deferred Guard slice (north-star §6.1/§6.2).
 Redactor = Callable[[str], str]
 BudgetCheck = Callable[[Tier], bool]  # True == this tier is within budget
