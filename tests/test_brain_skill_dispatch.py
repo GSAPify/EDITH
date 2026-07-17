@@ -98,6 +98,54 @@ async def test_no_match_runs_answer_path() -> None:
     assert decisions[0].payload["answer"] == "ok"
 
 
+class DecliningSkill:
+    """A skill whose trigger matches but that DECLINES the turn (handled=False)."""
+
+    name = "declining-skill"
+    triggers = ["review"]
+    needs_confirmation = False
+
+    def __init__(self) -> None:
+        self.ran_with: list[str] = []
+
+    async def run(self, context: SkillContext) -> SkillResult:
+        self.ran_with.append(context.utterance)
+        return SkillResult(skill=self.name, handled=False)
+
+
+async def test_declined_turn_falls_through_to_answer_path() -> None:
+    """A trigger-matched skill that returns handled=False must NOT eat the turn:
+    Brain publishes no skill.result and falls through to the recall→answer loop."""
+    bus = EventBus()
+    router = FakeRouter(answer="ok")
+    declining = DecliningSkill()
+    Brain(bus=bus, memory=FakeMemory(), router=router, skills=[declining])
+
+    decisions, skill_results = await _run(bus, "review my day")
+
+    assert declining.ran_with == ["review my day"]  # it did run (trigger matched)
+    assert skill_results == []                       # but nothing was published
+    assert len(router.calls) == 1                    # and Brain answered instead
+    assert decisions[0].payload["answer"] == "ok"
+
+
+async def test_declining_skill_yields_to_a_later_handling_skill() -> None:
+    """When a declining skill is followed by one that handles, the later one wins."""
+    bus = EventBus()
+    router = FakeRouter()
+    declining = DecliningSkill()
+    handling = FakeSkill()  # also triggers on "review", returns handled=True (default)
+    Brain(bus=bus, memory=FakeMemory(), router=router, skills=[declining, handling])
+
+    decisions, skill_results = await _run(bus, "review Tavishi's PR")
+
+    assert declining.ran_with == ["review Tavishi's PR"]
+    assert handling.ran_with == ["review Tavishi's PR"]  # tried next, it handled
+    assert len(skill_results) == 1
+    assert skill_results[0].source == "fake-skill"
+    assert router.calls == []  # a skill handled it → no answer path
+
+
 async def test_empty_registry_default_is_unchanged() -> None:
     bus = EventBus()
     router = FakeRouter(answer="ok")

@@ -195,30 +195,29 @@ class Brain:
         when nothing matched (caller falls through to the recall→answer path).
         """
         lowered = utterance.lower()
-        skill = next(
-            (
-                s
-                for s in self._skills
-                if any(trigger.lower() in lowered for trigger in s.triggers)
-            ),
-            None,
-        )
-        if skill is None:
-            return False
-
-        result = await skill.run(SkillContext(utterance=utterance, memory=self._memory))
-        await self._bus.publish(
-            "skill.result",
-            source=skill.name,
-            payload={
-                "findings": result.findings,
-                "pr_url": result.pr_url,
-                "posted": result.posted,
-                "remembered": result.remembered,
-                "asked": result.asked,
-            },
-        )
-        return True
+        for skill in self._skills:
+            if not any(trigger.lower() in lowered for trigger in skill.triggers):
+                continue
+            result = await skill.run(SkillContext(utterance=utterance, memory=self._memory))
+            # A skill may DECLINE a turn its trigger matched (handled=False) — e.g.
+            # desktop's broad "open "/"play " caught an utterance it can't action. Skip
+            # it (no publish) and keep looking; nothing matches -> fall through to the
+            # recall→answer loop instead of dead-ending the turn.
+            if not result.handled:
+                continue
+            await self._bus.publish(
+                "skill.result",
+                source=skill.name,
+                payload={
+                    "findings": result.findings,
+                    "pr_url": result.pr_url,
+                    "posted": result.posted,
+                    "remembered": result.remembered,
+                    "asked": result.asked,
+                },
+            )
+            return True
+        return False
 
     async def _resolve_on_miss(
         self, utterance: str, recalled: list[dict[str, object]]

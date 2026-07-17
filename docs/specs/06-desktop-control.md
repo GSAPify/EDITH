@@ -400,15 +400,81 @@ uv run pytest tests/skills/test_desktop_control.py -v
 
 ---
 
-## Completion Record — Desktop Control — (date TBD)
+## Completion Record — Desktop Control — 2026-07-12 (Session 16)
 
-> Fill this at session end per `../SESSION-PROTOCOL.md` §4 (canonical template lives there).
-> Leave empty until the slice is built.
+- **What shipped:** Voice-driven macOS automation as one Skill. The owner can say
+  "open Spotify", "play Bohemian Rhapsody on Spotify", "pause the music", "set the volume
+  to 40", "open a terminal in concorde_lib", or "start OMC in concorde_lib" and the action
+  fires — no keyboard. New `edith/desktop/` package (parser + resolver + executors) and
+  `DesktopControlSkill`, registered in `edithd`'s Brain LAST.
 
-- **What shipped:**
-- **How it works:**
+- **How it works:** `parse_command` (regex fast-path, zero model calls) classifies the
+  utterance into a typed `DesktopAction`; a miss falls back to a single haiku classify ONLY
+  when a Router is wired. `RepoResolver` maps a fuzzy repo name to an absolute path by
+  scanning `~/gitstuff/` two levels deep (flat repos + org-nested clones) and fuzzy-matching
+  with `difflib` — model-free. Three executor functions (`launch_app`, `spotify_command`,
+  `open_terminal`) each build an argv / AppleScript string and hand it to an injected
+  `Runner` seam (default = `asyncio.create_subprocess_exec`; tests inject a recorder). The
+  Skill: parse → (resolve repo for terminal/OMC) → execute via the seam → `speak` a summary.
+
 - **Key decisions made during build:**
+  - **Terminal.app `do script` for BOTH the visible-terminal AND the OMC-launch path** (see
+    Deviations). One parameterized `open_terminal(path, run_cmd=None)`; `run_cmd="claude"`
+    for OMC. No `Popen` lifecycle in the daemon.
+  - **`RepoResolver` prefers the flat `~/gitstuff/<name>` over a nested `~/gitstuff/<org>/<name>`
+    of the same basename.** The bulk workspace pull (`clone_workspace.sh`) clones into
+    `~/gitstuff/<org>/`, so a repo the owner also works on flat exists in BOTH places with an
+    identical remote (verified live: `~/gitstuff/agents` and `~/gitstuff/patterninc/agents`
+    both → `github.com/patterninc/agents.git`). Preferring the shallow working copy is picking
+    one repo's working copy, not guessing between two. Genuine ambiguity = two copies at the
+    SAME depth (e.g. `patterninc/x` + `ampmedia/x`, no flat tiebreaker) → still `AmbiguousRepo`
+    → ASK. The depth-preference lives ONLY in `_one` (the identical-basename bucket); the
+    cross-name fuzzy path still raises on multiple distinct matches.
+  - **`needs_confirmation = False`, no ASK/DENY code paths.** Every action the parser emits is
+    in the spec's AUTO set; the parser never produces a destructive/freeform-shell action, so
+    there is no reachable confirm branch to build (YAGNI).
+
 - **Deviations from spec + why:**
+  - **OMC launch via Terminal.app, not the spec's Option C headless owned shell.** `claude`
+    (the OMC entry-point) is an interactive TTY REPL and will not run under a pipe-backed
+    `Popen` — the spec flagged this in Open Question #4. Terminal.app `do script` gives a real
+    TTY and a visible window; Slice 4 SessionBus still narrates the session by tailing its
+    transcript. Recommended in advisor review.
+  - **No new graph schema.** The spec's `repo-map` data model proposed `Repo.aliases` /
+    `abs_path` / `last_used` columns. Sanctioned by the spec's honest-framing reminder: the
+    live graph's `Repo` nodes are metadata-only (empty `path`), so a schema migration would buy
+    nothing. Resolution is filesystem-first + `difflib`; Memory is not consulted for paths in v1.
+  - **Prefer-flat resolution** (above) is a refinement over the spec's plain hit/ambiguous split.
+
 - **Files created / changed:**
-- **Verification / tests run + results:**
+  - `edith/desktop/__init__.py`, `edith/desktop/control.py`, `edith/desktop/executors.py` (new)
+  - `edith/skills/desktop_control.py` (new); `edith/skills/__init__.py` (export)
+  - `edith/daemon/edithd.py` (register `DesktopControlSkill` last, ~10 lines)
+  - `tests/test_desktop_control.py` (new, 30 cases)
+
+- **Verification / tests run + results:** Full suite **264 passed, 2 skipped**; ruff clean;
+  pyright clean on all Slice-6 files (repo has 17 pre-existing pyright errors on master,
+  untouched — out of scope). **Safe live checks (no side effects):** parsed all 6 spec
+  canonical utterances correctly; `osacompile`d the generated Spotify + Terminal AppleScript
+  (compiles clean, including an embedded-quote case) — proves the escaping is well-formed
+  without executing; ran `RepoResolver` against the real `~/gitstuff` (1400+ repos across flat
+  + patterninc/ + ampmedia/) → `agents`/`agentsmith` resolve to the flat working copy, a
+  bogus name returns clean NOT_FOUND.
+
 - **Follow-ups / known gaps:**
+  - **Owner LIVE-SMOKE still required** for the actual OS behaviour (Spotify opens, Terminal
+    launches, OMC starts). This project's recurring bite: tests green ≠ works live. Not run
+    this session (intrusive during a build).
+  - **Prefer-flat residual:** if a flat personal experiment shares a name with an org repo you
+    meant, it picks the experiment. Low-probability for this layout, recoverable (wrong dir
+    opens, correct it), acceptable v1.
+  - **Broad triggers + dead-end (FIXED in review pass):** `"open "`/`"play "` are broad. If the
+    parser can't classify a matched utterance the Skill now returns `handled=False` and Brain
+    falls through to the recall→answer loop (a new `SkillResult.handled` flag; see
+    `brain/loop.py::_dispatch_skill`). Residual: a phrase like "play devil's advocate" still
+    parses as a Spotify play (the regex can't tell media-play from figurative-play) — inherent
+    to keyword triggers without an intent classifier; accepted for v1, registered LAST to limit
+    blast radius.
+  - **Haiku fallback** fires only when a Router is wired; JSON-classify is minimal (no retry).
+  - **Guard** is still the deferred allow-by-default seam project-wide; this slice relies on the
+    parser's AUTO-only output rather than a real authorize gate.
