@@ -134,6 +134,58 @@ async def test_resume_calls_voice_set_paused_false(data_dir: Path) -> None:
     assert False in voice.pause_states, "set_paused(False) not called after resume"
 
 
+async def test_plain_answer_is_spoken_via_brain_decision(data_dir: Path) -> None:
+    """A non-skill utterance → Brain answers → daemon speaks brain.decision (spec 10)."""
+    voice = FakeVoiceIO()
+    daemon = _daemon(data_dir, voice=voice)
+    await daemon.start()
+    try:
+        await daemon.bus.publish(
+            "voice.utterance", source="voice", payload={"text": "what is the capital of France"}
+        )
+    finally:
+        await daemon.stop()
+
+    assert voice.spoken == ["ok"]  # the FakeRouter's answer, spoken exactly once
+
+
+async def test_skill_turn_does_not_double_speak(data_dir: Path) -> None:
+    """A skill handles the turn and speaks itself; brain.decision must NOT also fire,
+    so the router's plain answer ('ok') is never spoken on a skill turn (no double-speak)."""
+    voice = FakeVoiceIO()
+    daemon = _daemon(data_dir, voice=voice)
+    await daemon.start()
+    try:
+        await daemon.bus.publish(
+            "voice.utterance", source="voice", payload={"text": "review Tavishi's PR"}
+        )
+    finally:
+        await daemon.stop()
+
+    assert voice.spoken, "skill should have spoken (its asked/answer)"
+    assert "ok" not in voice.spoken  # the plain-answer path did NOT also speak
+
+
+async def test_no_speak_the_decision_subscriber_without_voice(data_dir: Path) -> None:
+    """voice=None: the plain-answer path just publishes brain.decision, nothing speaks."""
+    daemon = _daemon(data_dir, voice=None)
+    seen: list[object] = []
+
+    async def cap(event: object) -> None:
+        seen.append(event)
+
+    await daemon.start()
+    daemon.bus.subscribe("brain.decision", cap)
+    try:
+        await daemon.bus.publish(
+            "voice.utterance", source="voice", payload={"text": "hello there"}
+        )
+    finally:
+        await daemon.stop()
+
+    assert len(seen) == 1  # brain.decision fired; no voice to speak it, no error
+
+
 async def test_voice_none_leaves_behaviour_unchanged(data_dir: Path) -> None:
     """Default voice=None: daemon starts/stops cleanly, Control API works."""
     daemon = _daemon(data_dir, voice=None)

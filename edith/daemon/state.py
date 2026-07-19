@@ -39,6 +39,12 @@ class RuntimeState:
         """True only while PAUSED — Brain reads this to suspend a pass."""
         return self.state is DaemonState.PAUSED
 
+    @property
+    def is_stopping(self) -> bool:
+        """True once STOPPING — Brain skips a pass so a late utterance never runs
+        against subsystems the shutdown path is tearing down (spec 10 review)."""
+        return self.state is DaemonState.STOPPING
+
     def pause(self) -> None:
         """Enter PAUSED. Idempotent. Illegal once STOPPING."""
         self._guard_not_stopping("pause")

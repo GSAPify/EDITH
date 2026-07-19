@@ -53,6 +53,18 @@ def test_kill_enters_stopping():
     assert state.is_paused is False
 
 
+def test_is_stopping_view():
+    """is_stopping is True only while STOPPING — Brain reads it to skip a pass during
+    shutdown (spec 10 review: prevents a late utterance hitting a closing Kuzu handle)."""
+    state = RuntimeState()
+    assert state.is_stopping is False  # RUNNING
+    state.pause()
+    assert state.is_stopping is False  # PAUSED
+    state.resume()
+    state.kill()
+    assert state.is_stopping is True  # STOPPING
+
+
 def test_pause_is_idempotent():
     state = RuntimeState()
     state.pause()

@@ -36,8 +36,9 @@ import keyring
 from keyring.errors import KeyringError
 
 from edith.brain import Brain
+from edith.brain.history import TurnBuffer
 from edith.brain.loop import MemoryLike, ResolveRepoLike, RouterLike
-from edith.bus import EventBus
+from edith.bus import Event, EventBus
 from edith.daemon.control import BudgetView, ControlServer
 from edith.daemon.securestore import LocalSecureStore, SecureStore
 from edith.daemon.state import RuntimeState
@@ -48,9 +49,13 @@ from edith.session.bus import SessionBus
 from edith.session.collector import TranscriptCollector
 from edith.session.narrator import Narrator
 from edith.skills import DesktopControlSkill, PRReviewSkill, SessionQuerySkill
+from edith.voice.persona import VOICE_PERSONA
 
 _KEYRING_SERVICE = "edithd"
 _SOCKET_NAME = "edithd.sock"
+# Spoken replies are read aloud → cap tight (spec 10 §Brevity; latency compounds
+# with endpointing + follow-up windows). Only applied on the voice-wired path.
+_VOICE_MAX_TOKENS = 120
 
 
 class VoiceIOLike(Protocol):
@@ -118,6 +123,8 @@ class EdithDaemon:
         resolve_repo: ResolveRepoLike | None = None,
         voice: VoiceIOLike | None = None,
         enable_session_awareness: bool = False,
+        enable_voice: bool = False,
+        bus: EventBus | None = None,
     ) -> None:
         self._secrets = secrets  # held in RAM only; never logged
         # Realtime resolve-on-miss (spec 09). Injected for tests; when absent
@@ -136,14 +143,20 @@ class EdithDaemon:
         # transcript collector + idle-narration loop only spin up when explicitly
         # enabled, so unit tests never tail the owner's real ~/.claude/projects.
         self._enable_session_awareness = enable_session_awareness
+        # Run the live mic/wake/STT loop as a background task (spec 10). Gated so
+        # unit tests never open a mic; requires a real VoiceIO. Off by default.
+        self._enable_voice = enable_voice
         self._store: SecureStore = secure_store or LocalSecureStore(data_dir)
         self._budget: BudgetView = budget or _ZeroBudget()
         self.state = RuntimeState()
-        self.bus = EventBus()
+        # A caller may inject the bus so a VoiceIO built on the SAME bus can be passed
+        # as ``voice`` (the composition root does this — spec 10). Default: our own.
+        self.bus = bus or EventBus()
         self._brain: Brain | None = None
         self._control: ControlServer | None = None
         self._session_bus: SessionBus | None = None
         self._session_tasks: list[asyncio.Task[None]] = []
+        self._voice_task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
 
     @property
@@ -197,14 +210,29 @@ class EdithDaemon:
             if speak is not None
             else DesktopControlSkill(router=self._router)
         )
+        # On the voice-wired path, give Brain the spoken persona, a tight token cap,
+        # and an in-session recent-turns buffer so it answers by voice with cross-turn
+        # context (spec 10). Without voice these stay None/default → unchanged.
+        voiced = self._voice is not None
         self._brain = Brain(
             bus=self.bus,
             memory=self._memory,
             router=self._router,
-            is_paused=lambda: self.state.is_paused,
+            # Skip a pass while PAUSED (privacy) OR STOPPING — the latter makes the
+            # docstring's "STOPPING blocks Brain" real and prevents a late mic
+            # utterance from running recall/remember against a closing Kuzu handle.
+            is_paused=lambda: self.state.is_paused or self.state.is_stopping,
             resolve_repo=resolver,
             skills=[pr_skill, session_skill, desktop_skill],
+            history=TurnBuffer() if voiced else None,
+            system_preamble=VOICE_PERSONA if voiced else None,
+            answer_max_tokens=_VOICE_MAX_TOKENS if voiced else None,
         )
+        # Speak-the-decision: Brain publishes brain.decision ONLY on the plain-answer
+        # path (a skill that handles a turn publishes skill.result and speaks itself),
+        # so this subscriber speaks that path with no double-speak (spec 10 §decision 3).
+        if voiced:
+            self.bus.subscribe("brain.decision", self._speak_decision)
 
         # Live transcript tap + idle narration — only when explicitly enabled.
         if self._enable_session_awareness:
@@ -225,8 +253,36 @@ class EdithDaemon:
         )
         await self._control.start()
 
+        # Live audio loop (spec 10): only with a real VoiceIO AND enable_voice, so
+        # unit tests never open a mic. Runs the blocking mic/wake/STT loop in a worker
+        # thread; each utterance publishes voice.utterance → Brain answers → speak.
+        if self._voice is not None and self._enable_voice:
+            self._start_voice_loop(self._voice)
+
         # 6. RUNNING.
         self.state.last_event = "daemon.started"
+
+    async def _speak_decision(self, event: Event) -> None:
+        """Speak the plain-answer ``brain.decision`` via VoiceIO (spec 10 §decision 3)."""
+        if self._voice is None:
+            return
+        answer = str(event.payload.get("answer", ""))
+        if answer:
+            await self._voice.speak(answer)
+
+    def _start_voice_loop(self, voice: VoiceIOLike) -> None:
+        """Start the blocking live mic loop as a background task (spec 10).
+
+        ``run_live_loop`` is imported locally — it pulls the audio stack
+        (sounddevice/openWakeWord/faster-whisper) which the daemon must not require
+        on the voice=None path. NOTE: the loop runs via ``asyncio.to_thread``;
+        cancelling this task does NOT stop the thread (``RawInputStream.read`` runs
+        until process exit) — clean teardown is process exit, per the Completion Record.
+        """
+        from edith.voice.live import run_live_loop  # optional dep — voice path only
+
+        loop = asyncio.get_running_loop()
+        self._voice_task = loop.create_task(run_live_loop(voice))  # type: ignore[arg-type]
 
     def _make_default_resolver(self, store: MemoryStore) -> ResolveRepoLike:
         """A ``resolve_repo``-shaped closure bound to this daemon's store+router.
@@ -293,6 +349,11 @@ class EdithDaemon:
         for task in self._session_tasks:
             task.cancel()
         self._session_tasks = []
+        # Cancel the live-voice task (best-effort: the blocking mic thread behind
+        # asyncio.to_thread keeps running until process exit — see _start_voice_loop).
+        if self._voice_task is not None:
+            self._voice_task.cancel()
+            self._voice_task = None
 
         # 2. final compact() — deferred on the real MemoryStore, so call it only
         #    if present (# TODO(compact): remove the guard once Memory.compact lands).

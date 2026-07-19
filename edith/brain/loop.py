@@ -36,8 +36,8 @@ from edith.brain.history import TurnBuffer
 from edith.bus import Event, EventBus
 from edith.finder import ResolveResult, ResolveStatus
 from edith.memory.secrets import sanitize_text
-from edith.memory.store import Node
-from edith.router import ModelResponse, Tier
+from edith.memory.store import Edge, Node
+from edith.router import MODEL_CALL_ERRORS, ModelResponse, Tier
 from edith.skills import Skill, SkillContext
 
 _SYSTEM_PREAMBLE = (
@@ -49,6 +49,10 @@ _SYSTEM_PREAMBLE = (
 # fits; Slice 5 gives the Router the final say and the two-call mechanics).
 _DEFAULT_TIER = Tier.SONNET
 
+# Spoken when the router's transport fails (spec 10 §Model-error seam) — the daemon
+# has no other handler on this path, so Brain speaks an apology instead of going silent.
+_MODEL_ERROR_REPLY = "Sorry sir, I couldn't reach the model just now."
+
 
 class MemoryLike(Protocol):
     """The slice of the Memory contract Brain uses (north-star §4.3)."""
@@ -56,7 +60,7 @@ class MemoryLike(Protocol):
     def recall(self, query: str) -> list[dict[str, object]]: ...
 
     def remember(
-        self, nodes: list[Node] | None = None, edges: list[object] | None = None
+        self, nodes: list[Node] | None = None, edges: list[Edge] | None = None
     ) -> None: ...
 
 
@@ -94,10 +98,18 @@ class Brain:
         resolve_repo: ResolveRepoLike | None = None,
         skills: Sequence[Skill] | None = None,
         history: TurnBuffer | None = None,
+        system_preamble: str | None = None,
+        answer_max_tokens: int | None = None,
     ) -> None:
         self._bus = bus
         self._memory = memory
         self._router = router
+        # Voice persona + brevity (spec 10 §Persona/Brevity). Default None ->
+        # the generic preamble and the Router's default max_tokens, so non-voice
+        # callers (and every existing test) are unchanged. The daemon passes the
+        # JARVIS "sir" persona + a tight cap for the spoken path.
+        self._system_preamble = system_preamble or _SYSTEM_PREAMBLE
+        self._answer_max_tokens = answer_max_tokens
         # Recent-turns buffer (spec 03 §Conversation memory — literal half).
         # Default None -> no splicing, no add: behaviour identical to the
         # pre-buffer loop, so every existing test stays green. When wired, prior
@@ -147,7 +159,7 @@ class Brain:
             recalled = [*recalled, {"text": resolved_answer}]
 
         # 2. ASSEMBLE + 3. REDACT (sanitize every message before it leaves the box)
-        messages = _assemble(utterance, recalled)
+        messages = _assemble(utterance, recalled, self._system_preamble)
         safe_messages = _redact(messages)
 
         # 3b. HISTORY (spec 03 §Conversation memory): splice the recent-turns
@@ -163,8 +175,21 @@ class Brain:
             ]
             safe_messages = [safe_messages[0], *history_messages, *safe_messages[1:]]
 
-        # 4. DECIDE (single-tier passthrough)
-        response = await self._router.model_call(safe_messages, _DEFAULT_TIER)
+        # 4. DECIDE (single-tier passthrough). Catch the router's declared transport
+        # errors so a network blip speaks a graceful apology instead of going silent —
+        # the daemon has no other handler on this path (the standalone harness used to
+        # catch here). A failed exchange is NOT remembered/trailed (don't pollute
+        # memory or the buffer with an apology).
+        try:
+            if self._answer_max_tokens is not None:
+                response = await self._router.model_call(
+                    safe_messages, _DEFAULT_TIER, self._answer_max_tokens
+                )
+            else:
+                response = await self._router.model_call(safe_messages, _DEFAULT_TIER)
+        except MODEL_CALL_ERRORS:
+            await self._publish_decision(_MODEL_ERROR_REPLY)
+            return
 
         # 5. REMEMBER the exchange (never-persist filter runs again inside remember)
         self._remember_exchange(utterance, response.text)
@@ -177,6 +202,10 @@ class Brain:
             self._history.add("assistant", sanitize_text(response.text))
 
         # 6. PUBLISH the decision
+        await self._publish_decision(response.text)
+
+    async def _publish_decision(self, answer: str) -> None:
+        """Publish the plain-answer ``brain.decision`` (the daemon speaks it; spec 10)."""
         await self._bus.publish(
             "brain.decision",
             source="brain",
@@ -184,7 +213,7 @@ class Brain:
                 "intent": "answer_query",
                 "action": "answer",
                 "tier_used": _DEFAULT_TIER.value,
-                "answer": response.text,
+                "answer": answer,
             },
         )
 
@@ -253,12 +282,16 @@ class Brain:
         self._memory.remember(nodes=[node])
 
 
-def _assemble(utterance: str, recalled: list[dict[str, object]]) -> list[dict[str, object]]:
+def _assemble(
+    utterance: str,
+    recalled: list[dict[str, object]],
+    system_preamble: str = _SYSTEM_PREAMBLE,
+) -> list[dict[str, object]]:
     """Working context = system preamble + recalled facts + the utterance."""
     facts = "\n".join(
         f"- {hit.get('text')}" for hit in recalled if hit.get("text")
     )
-    system = _SYSTEM_PREAMBLE
+    system = system_preamble
     if facts:
         system += "\n\nRecalled facts:\n" + facts
     return [
