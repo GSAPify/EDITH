@@ -7,6 +7,7 @@ to a Bifrost model id and one HTTP call is made. The surface stays stable so
 Slice 5 can replace the internals without touching callers.
 """
 
+from edith.router.background import supervised_reason, think_async
 from edith.router.bifrost import MODEL_CALL_ERRORS, ModelChunk, ModelResponse, Router
 from edith.router.tiers import TaskType, Tier, TierDecision, resolve_tier
 
@@ -19,4 +20,6 @@ __all__ = [
     "Tier",
     "TierDecision",
     "resolve_tier",
+    "supervised_reason",
+    "think_async",
 ]
