@@ -137,31 +137,22 @@ class VectorMemoryStore(MemoryStore):
     def compact(self, *, max_conversation_facts: int = 500) -> int:
         """Evict old conv-* Facts from the graph AND their embeddings from sqlite-vec.
 
-        Delegates selection and graph deletion to ``MemoryStore.compact``, then
-        removes the corresponding rows from ``fact_map`` and ``fact_vectors`` so
-        no orphaned embeddings remain. The sqlite side runs in a single
-        transaction; any failure rolls back and re-raises.
+        Selects the evictable ids via the shared ``MemoryStore._conv_facts_to_evict`` (so the
+        selection query can't drift from the base), deletes each from the graph via the shared
+        ``_evict_fact_from_graph``, then removes the matching ``fact_map`` + ``fact_vectors``
+        rows in one sqlite transaction (rollback + re-raise on error). No embed() call.
+        Pure/synchronous.
 
-        No embed() call — deletion needs no embedding. Pure/synchronous.
+        Atomicity is honest, not cross-engine: the graph DETACH DELETEs autocommit before the
+        sqlite prune, so a sqlite rollback can leave transient orphaned embeddings until the
+        next compact — acceptable for a best-effort shutdown-path evictor.
         """
-        # Collect the ids that will be evicted BEFORE deleting from the graph,
-        # so we can look them up in fact_map by fact_id.
-        rows = list(
-            self._rows(
-                "MATCH (f:Fact) WHERE f.id STARTS WITH 'conv-' "
-                "RETURN f.id ORDER BY f.learned_at DESC"
-            )
-        )
-        evict_ids = [str(row[0]) for row in rows[max_conversation_facts:]]
+        evict_ids = self._conv_facts_to_evict(max_conversation_facts)
         if not evict_ids:
             return 0
 
-        # Delete from the graph (DETACH DELETE handles edges).
         for fact_id in evict_ids:
-            self._run(
-                "MATCH (f:Fact {id: $id}) DETACH DELETE f",
-                {"id": fact_id},
-            )
+            self._evict_fact_from_graph(fact_id)
 
         # Delete from sqlite-vec (fact_map + fact_vectors) in one transaction.
         try:
@@ -178,7 +169,7 @@ class VectorMemoryStore(MemoryStore):
                         "DELETE FROM fact_map WHERE rowid = ?", (rowid,)
                     )
             self._vec.commit()
-        except Exception:
+        except sqlite3.Error:
             self._vec.rollback()
             raise
 

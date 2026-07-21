@@ -373,20 +373,26 @@ class MemoryStore:
         cannot live on the synchronous shutdown path. That work belongs in a
         separate async compaction pass.
         """
-        # Collect all conv-* Fact ids ordered newest-first.
+        to_evict = self._conv_facts_to_evict(max_conversation_facts)
+        for fact_id in to_evict:
+            self._evict_fact_from_graph(fact_id)
+        return len(to_evict)
+
+    def _conv_facts_to_evict(self, max_conversation_facts: int) -> list[str]:
+        """Ids of the ``conv-*`` Facts beyond the newest ``max_conversation_facts`` — the
+        evictable tail, newest-first. Single-sourced so ``MemoryStore.compact`` and
+        ``VectorMemoryStore.compact`` share ONE selection query and can't drift."""
         rows = list(
             self._rows(
                 "MATCH (f:Fact) WHERE f.id STARTS WITH 'conv-' "
                 "RETURN f.id ORDER BY f.learned_at DESC"
             )
         )
-        to_evict = [str(row[0]) for row in rows[max_conversation_facts:]]
-        for fact_id in to_evict:
-            self._run(
-                "MATCH (f:Fact {id: $id}) DETACH DELETE f",
-                {"id": fact_id},
-            )
-        return len(to_evict)
+        return [str(row[0]) for row in rows[max_conversation_facts:]]
+
+    def _evict_fact_from_graph(self, fact_id: str) -> None:
+        """``DETACH DELETE`` a Fact node (removes its ``relates_to`` edges atomically)."""
+        self._run("MATCH (f:Fact {id: $id}) DETACH DELETE f", {"id": fact_id})
 
     def close(self) -> None:
         """Close the connection and DB, releasing the on-disk lock."""
