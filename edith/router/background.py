@@ -17,9 +17,20 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import Protocol
 
-from edith.router.bifrost import _DEFAULT_MAX_TOKENS, ModelResponse, Router
+from edith.router.bifrost import _DEFAULT_MAX_TOKENS, ModelResponse
 from edith.router.tiers import Tier
+
+
+class _RouterLike(Protocol):
+    """The slice of the Router these helpers use (structural — the real ``Router``
+    satisfies it, and tests can pass a fake without subclassing; mirrors Brain's
+    ``RouterLike``)."""
+
+    async def model_call(
+        self, messages: list[dict[str, object]], tier_hint: Tier, max_tokens: int = ...
+    ) -> ModelResponse: ...
 
 # Router-owned instruction for the review pass. The reviewer gets the full original context
 # plus the draft (folded in as the assistant turn) and is asked to critique+improve it —
@@ -31,7 +42,7 @@ _REVIEW_INSTRUCTION = (
 
 
 async def supervised_reason(
-    router: Router,
+    router: _RouterLike,
     messages: list[dict[str, object]],
     *,
     draft_tier: Tier = Tier.SONNET,
@@ -54,7 +65,7 @@ async def supervised_reason(
 
 
 async def think_async(
-    router: Router,
+    router: _RouterLike,
     messages: list[dict[str, object]],
     *,
     on_result: Callable[[ModelResponse], Awaitable[None]] | None = None,
@@ -68,6 +79,10 @@ async def think_async(
     voice half-duplex gate + cooldown + conversation-window + echo-suppression, which the lead
     wires separately. The default ``on_result=None`` is NOT a consumer; the task still runs and
     the result stays retrievable via the returned task.
+
+    CALLER CONTRACT: retain the returned task. asyncio holds only a WEAK reference to a
+    scheduled task, so a caller that drops the handle without awaiting it risks the task
+    being garbage-collected mid-flight before it completes.
     """
 
     async def _run() -> ModelResponse:
