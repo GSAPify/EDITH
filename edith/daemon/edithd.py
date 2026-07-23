@@ -45,6 +45,7 @@ from edith.daemon.state import RuntimeState
 from edith.finder import ResolveResult
 from edith.finder import resolve_repo as _resolve_repo_impl
 from edith.memory.store import MemoryStore
+from edith.router import BackgroundReasoner
 from edith.session.bus import SessionBus
 from edith.session.collector import TranscriptCollector
 from edith.session.narrator import Narrator
@@ -153,6 +154,9 @@ class EdithDaemon:
         # as ``voice`` (the composition root does this — spec 10). Default: our own.
         self.bus = bus or EventBus()
         self._brain: Brain | None = None
+        # Background reasoner (spec 11): built in start() from the injected router so a deep
+        # turn can fire opus off the live path. Cancelled on shutdown (cancel_all in stop()).
+        self._reasoner: BackgroundReasoner | None = None
         self._control: ControlServer | None = None
         self._session_bus: SessionBus | None = None
         self._session_tasks: list[asyncio.Task[None]] = []
@@ -210,6 +214,10 @@ class EdithDaemon:
             if speak is not None
             else DesktopControlSkill(router=self._router)
         )
+        # Background reasoner (spec 11): opus deep work that never blocks the live turn. Built
+        # from the injected router; Guard's real budget is deferred so it defaults to allow.
+        self._reasoner = BackgroundReasoner(self._router)
+
         # On the voice-wired path, give Brain the spoken persona, a tight token cap,
         # and an in-session recent-turns buffer so it answers by voice with cross-turn
         # context (spec 10). Without voice these stay None/default → unchanged.
@@ -227,12 +235,17 @@ class EdithDaemon:
             history=TurnBuffer() if voiced else None,
             system_preamble=VOICE_PERSONA if voiced else None,
             answer_max_tokens=_VOICE_MAX_TOKENS if voiced else None,
+            reasoner=self._reasoner,
         )
         # Speak-the-decision: Brain publishes brain.decision ONLY on the plain-answer
         # path (a skill that handles a turn publishes skill.result and speaks itself),
         # so this subscriber speaks that path with no double-speak (spec 10 §decision 3).
         if voiced:
             self.bus.subscribe("brain.decision", self._speak_decision)
+            # Background-reasoning ping (spec 11): when an opus job lands, Brain publishes
+            # brain.background_done with a short spoken summary → speak it. A dedicated event
+            # (not brain.decision) so a background result is distinguishable from a live answer.
+            self.bus.subscribe("brain.background_done", self._speak_background)
 
         # Live transcript tap + idle narration — only when explicitly enabled.
         if self._enable_session_awareness:
@@ -264,6 +277,14 @@ class EdithDaemon:
 
     async def _speak_decision(self, event: Event) -> None:
         """Speak the plain-answer ``brain.decision`` via VoiceIO (spec 10 §decision 3)."""
+        if self._voice is None:
+            return
+        answer = str(event.payload.get("answer", ""))
+        if answer:
+            await self._voice.speak(answer)
+
+    async def _speak_background(self, event: Event) -> None:
+        """Speak a finished background-reasoning summary (spec 11 §on_done)."""
         if self._voice is None:
             return
         answer = str(event.payload.get("answer", ""))
@@ -354,6 +375,10 @@ class EdithDaemon:
         if self._voice_task is not None:
             self._voice_task.cancel()
             self._voice_task = None
+        # Cancel any in-flight background opus jobs (spec 11 §Shutdown ownership) — a job can
+        # outlive the turn that started it; don't leave an opus call dangling past shutdown.
+        if self._reasoner is not None:
+            self._reasoner.cancel_all()
 
         # 2. final compact() — deferred on the real MemoryStore, so call it only
         #    if present (# TODO(compact): remove the guard once Memory.compact lands).
