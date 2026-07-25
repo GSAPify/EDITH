@@ -347,6 +347,47 @@ class MemoryStore:
             return int(row[0])  # type: ignore[arg-type]
         return 0
 
+    def compact(self, *, max_conversation_facts: int = 500) -> int:
+        """Evict the oldest conversation Facts beyond ``max_conversation_facts``.
+
+        Only ``conv-*`` Facts (written by ``Brain._remember_exchange``) are
+        considered. Facts from ingest, PR-review, or any other source whose id
+        does not start with ``"conv-"`` are never touched.
+
+        Ordering is by ``learned_at`` descending (newest first). Because
+        ``learned_at`` is stored as ``str(time.time())`` — a fixed-width
+        10-digit integer part followed by a decimal — lexicographic order
+        matches numeric recency for all production-written values. Tests must
+        seed similarly-formatted values (e.g. ``str(1_720_000_000.0 + i)``).
+
+        Each evictable node is deleted with ``DETACH DELETE`` so any
+        ``relates_to`` edges are removed atomically with the node.
+
+        Pure synchronous, no model call, no network. Safe to call from a sync
+        shutdown path. Idempotent: a second call with the same limit evicts 0.
+
+        Returns the number of Facts evicted.
+
+        NOTE — summarizing rollup (compressing evicted Facts into a digest) is
+        explicitly OUT OF SCOPE here: it requires a model call and therefore
+        cannot live on the synchronous shutdown path. That work belongs in a
+        separate async compaction pass.
+        """
+        # Collect all conv-* Fact ids ordered newest-first.
+        rows = list(
+            self._rows(
+                "MATCH (f:Fact) WHERE f.id STARTS WITH 'conv-' "
+                "RETURN f.id ORDER BY f.learned_at DESC"
+            )
+        )
+        to_evict = [str(row[0]) for row in rows[max_conversation_facts:]]
+        for fact_id in to_evict:
+            self._run(
+                "MATCH (f:Fact {id: $id}) DETACH DELETE f",
+                {"id": fact_id},
+            )
+        return len(to_evict)
+
     def close(self) -> None:
         """Close the connection and DB, releasing the on-disk lock."""
         self._conn.close()

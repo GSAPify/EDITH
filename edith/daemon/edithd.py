@@ -154,7 +154,7 @@ class EdithDaemon:
         # as ``voice`` (the composition root does this — spec 10). Default: our own.
         self.bus = bus or EventBus()
         self._brain: Brain | None = None
-        # Background reasoner (spec 11): built in start() from the injected router so a deep
+        # Background reasoner (spec 13): built in start() from the injected router so a deep
         # turn can fire opus off the live path. Cancelled on shutdown (cancel_all in stop()).
         self._reasoner: BackgroundReasoner | None = None
         self._control: ControlServer | None = None
@@ -214,7 +214,7 @@ class EdithDaemon:
             if speak is not None
             else DesktopControlSkill(router=self._router)
         )
-        # Background reasoner (spec 11): opus deep work that never blocks the live turn. Built
+        # Background reasoner (spec 13): opus deep work that never blocks the live turn. Built
         # from the injected router; Guard's real budget is deferred so it defaults to allow.
         self._reasoner = BackgroundReasoner(self._router)
 
@@ -242,7 +242,7 @@ class EdithDaemon:
         # so this subscriber speaks that path with no double-speak (spec 10 §decision 3).
         if voiced:
             self.bus.subscribe("brain.decision", self._speak_decision)
-            # Background-reasoning ping (spec 11): when an opus job lands, Brain publishes
+            # Background-reasoning ping (spec 13): when an opus job lands, Brain publishes
             # brain.background_done with a short spoken summary → speak it. A dedicated event
             # (not brain.decision) so a background result is distinguishable from a live answer.
             self.bus.subscribe("brain.background_done", self._speak_background)
@@ -284,7 +284,7 @@ class EdithDaemon:
             await self._voice.speak(answer)
 
     async def _speak_background(self, event: Event) -> None:
-        """Speak a finished background-reasoning summary (spec 11 §on_done)."""
+        """Speak a finished background-reasoning summary (spec 13 §on_done)."""
         if self._voice is None:
             return
         answer = str(event.payload.get("answer", ""))
@@ -375,7 +375,7 @@ class EdithDaemon:
         if self._voice_task is not None:
             self._voice_task.cancel()
             self._voice_task = None
-        # Cancel any in-flight background opus jobs (spec 11 §Shutdown ownership) — a job can
+        # Cancel any in-flight background opus jobs (spec 13 §Shutdown ownership) — a job can
         # outlive the turn that started it; don't leave an opus call dangling past shutdown.
         if self._reasoner is not None:
             self._reasoner.cancel_all()

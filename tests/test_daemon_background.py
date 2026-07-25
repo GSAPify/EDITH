@@ -1,4 +1,4 @@
-"""Background-reasoning wiring into EdithDaemon (spec 11).
+"""Background-reasoning wiring into EdithDaemon (spec 13).
 
 Fakes only — no audio, no live model call. Asserts the daemon-specific integration:
   1. the daemon builds a BackgroundReasoner and injects it into Brain,

@@ -1,4 +1,4 @@
-"""Brain's background-reasoning triggers (spec 11).
+"""Brain's background-reasoning triggers (spec 13).
 
 Two ways Brain fires a background opus job through the injected reasoner:
   - EXPLICIT: an utterance like "think about X" → ack now, background the deep work, skip the
@@ -185,7 +185,7 @@ async def test_on_done_remembers_summarizes_and_pings() -> None:
 
 async def test_summary_failure_still_persists_the_opus_detail() -> None:
     # If the summary model call blips, the expensive opus detail must already be in Memory
-    # (persisted BEFORE the summary), and no ping fires (spec 11 §on_done ordering).
+    # (persisted BEFORE the summary), and no ping fires (spec 13 §on_done ordering).
     bus = EventBus()
     memory = FakeMemory()
     router = FakeRouter()
@@ -204,7 +204,7 @@ async def test_summary_failure_still_persists_the_opus_detail() -> None:
 
 async def test_what_do_you_think_about_is_a_live_answer_not_a_background_job() -> None:
     # The conversational "what do you think about X" wants a live opinion, not a deferred deep
-    # dive — the imperative trigger must not fire on it (spec 11 §explicit trigger).
+    # dive — the imperative trigger must not fire on it (spec 13 §explicit trigger).
     bus = EventBus()
     memory = FakeMemory()
     router = FakeRouter(answer="I'd lean toward option A")

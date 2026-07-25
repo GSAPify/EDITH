@@ -1,9 +1,17 @@
-# 11 — Background reasoning (`think_async` — fire-and-notify opus)
+# 13 — Background reasoning (`think_async` — fire-and-notify opus)
 
 > Closes the routing philosophy's UNMET centerpiece (spec 05 §Background reasoning): **opus never
 > blocks the live turn — it goes to the background and pings when done.** This slice ships
 > `think_async`: a budget-gated, cancellable, tracked background opus job that answers deep work
 > off the critical path and reports back by voice + `remember()`.
+>
+> **Numbering + relationship to spec 12.** Written as "spec 11" in a parallel worktree; renumbered
+> to **13** because `11-guard.md` and `12-router-background.md` landed on `master` first (PRs #17,
+> #18). Spec 12 shipped the same module name with a different design: a free-function `think_async`
+> that was explicitly "the seam, not the finished feature" — untracked, un-gated, no consumer.
+> **This spec's `BackgroundReasoner.think_async` supersedes it** and spec 12's version is removed;
+> spec 12's `supervised_reason` is **kept unchanged** (this slice does not provide one). Both now
+> live in `edith/router/background.py` behind one shared `RouterLike` Protocol.
 
 ## Purpose
 
@@ -136,8 +144,11 @@ TDD. `edith/` source stays pyright-clean; the full suite + ruff pass.
 
 ## Deferred / risks
 
-- **`supervised_reason` / `SupervisedSession` — NOT built.** Barge-in-coupled, owner-smoke-only,
-  speculative; contract stays the seam (spec 05 §Follow-ups).
+- ~~**`supervised_reason` — NOT built.**~~ **Superseded: it shipped on `master` in spec 12 (PR #18)**
+  and survives this merge unchanged (draft Sonnet → Opus critique+improve, awaited). Still NOT built:
+  **`SupervisedSession`** — barge-in-coupled, owner-smoke-only, speculative; contract stays the seam
+  (spec 05 §Follow-ups). Nothing in Brain calls `supervised_reason` yet either — it is consumable,
+  not consumed.
 - **Sonnet self-assessment auto-escalation — NOT built.** The utterance-size heuristic is the only
   passive trigger this slice ships; a per-turn "is this hard?" model call is extra spend and
   speculative. `suggest_background` remains in `resolve_tier` as its seam.
@@ -153,14 +164,25 @@ TDD. `edith/` source stays pyright-clean; the full suite + ruff pass.
   real Bifrost opus call.
 - **Guard still deferred** — `budget_check` defaults to allow.
 
-## Completion Record — 11 background-reasoning — 2026-07-23
+## Completion Record — 13 background-reasoning — 2026-07-23
 
 - **Built:** `BackgroundReasoner` + `BackgroundJob` + `JobStatus` (`edith/router/background.py`,
   exported); Brain explicit + passive(deep-input) triggers, `on_done` (remember→summarize→ping),
   `_is_deep_input`; daemon composition (`BackgroundReasoner(router)` injected, `brain.background_done`
   → `_speak_background` voiced-only, `cancel_all()` in `stop()`). **No `bifrost.py` change.**
-- **Tests:** 322 passed, 2 skipped (live), ruff clean, pyright at baseline (16 pre-existing test-fake
-  errors, `edith/` source + all three new test files 0). 20 new tests across the three files.
+- **Tests (pre-merge, on the `833d22f` base):** 322 passed, 2 skipped (live). **19** new tests across
+  the three new files (7 router + 8 brain + 4 daemon).
+- **Tests (post-merge with `master` `3131d33`, 2026-07-25): 348 passed, 2 skipped.** Arithmetic:
+  332 on master − 3 (spec 12's superseded free-function `think_async` tests, removed with it) + 19.
+  `ruff check edith tests` clean. pyright: 0 real errors in every file this branch touches — the only
+  diagnostics there are `reportMissingImports` for `httpx`/`keyring`, an environment artifact present
+  on `master` too (pyright is not resolving `.venv`).
+- **Merge resolution (2026-07-25):** `edith/router/background.py` now holds spec 12's
+  `supervised_reason` + this slice's `BackgroundReasoner`; spec 12's free-function `think_async` is
+  gone. `supervised_reason`'s `router` parameter was retyped from the concrete `Router` to the shared
+  `RouterLike` Protocol — that deletes the 4 `type: ignore[arg-type]` the concrete type would have
+  forced on its test fakes, and gives both entry points one seam. `docs/specs/11-background-reasoning.md`
+  → `13-background-reasoning.md`.
 - **Deviation from the brainstorm:** the owner chose "passive = the `suggest_background` flag," but the
   flag measures total assembled context, which would auto-fire opus on every turn once a session grew
   (unbounded cost with Guard deferred). Changed the passive trigger to measure the utterance itself

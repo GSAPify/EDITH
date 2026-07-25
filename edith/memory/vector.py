@@ -134,6 +134,56 @@ class VectorMemoryStore(MemoryStore):
             "INSERT INTO fact_vectors(rowid, embedding) VALUES (?, ?)", (rowid, vec)
         )
 
+    def compact(self, *, max_conversation_facts: int = 500) -> int:
+        """Evict old conv-* Facts from the graph AND their embeddings from sqlite-vec.
+
+        Delegates selection and graph deletion to ``MemoryStore.compact``, then
+        removes the corresponding rows from ``fact_map`` and ``fact_vectors`` so
+        no orphaned embeddings remain. The sqlite side runs in a single
+        transaction; any failure rolls back and re-raises.
+
+        No embed() call — deletion needs no embedding. Pure/synchronous.
+        """
+        # Collect the ids that will be evicted BEFORE deleting from the graph,
+        # so we can look them up in fact_map by fact_id.
+        rows = list(
+            self._rows(
+                "MATCH (f:Fact) WHERE f.id STARTS WITH 'conv-' "
+                "RETURN f.id ORDER BY f.learned_at DESC"
+            )
+        )
+        evict_ids = [str(row[0]) for row in rows[max_conversation_facts:]]
+        if not evict_ids:
+            return 0
+
+        # Delete from the graph (DETACH DELETE handles edges).
+        for fact_id in evict_ids:
+            self._run(
+                "MATCH (f:Fact {id: $id}) DETACH DELETE f",
+                {"id": fact_id},
+            )
+
+        # Delete from sqlite-vec (fact_map + fact_vectors) in one transaction.
+        try:
+            for fact_id in evict_ids:
+                row = self._vec.execute(
+                    "SELECT rowid FROM fact_map WHERE fact_id = ?", (fact_id,)
+                ).fetchone()
+                if row is not None:
+                    rowid = int(row[0])
+                    self._vec.execute(
+                        "DELETE FROM fact_vectors WHERE rowid = ?", (rowid,)
+                    )
+                    self._vec.execute(
+                        "DELETE FROM fact_map WHERE rowid = ?", (rowid,)
+                    )
+            self._vec.commit()
+        except Exception:
+            self._vec.rollback()
+            raise
+
+        return len(evict_ids)
+
     def build_vector_index(self) -> None:
         """No-op: sqlite-vec inserts are incremental (no build-once step).
 

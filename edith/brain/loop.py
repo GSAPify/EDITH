@@ -54,17 +54,17 @@ _DEFAULT_TIER = Tier.SONNET
 # has no other handler on this path, so Brain speaks an apology instead of going silent.
 _MODEL_ERROR_REPLY = "Sorry sir, I couldn't reach the model just now."
 
-# Explicit background-reasoning trigger (spec 11): the IMPERATIVE "think about X" / "think on
+# Explicit background-reasoning trigger (spec 13): the IMPERATIVE "think about X" / "think on
 # X". A thin heuristic mirroring _REPO_PHRASE. The negative lookbehind excludes the common
 # conversational "(what do) you think about X" — an opinion question that wants a live answer,
 # not a deferred deep dive. A false positive still only costs one background think + an ack.
 _THINK_PHRASE = re.compile(r"(?<!you )\bthink\s+(?:about|on)\b", re.IGNORECASE)
 
 # Spoken immediately when a background reasoning job is kicked off (the live turn ends here;
-# the real answer arrives later via brain.background_done — spec 11 §Purpose).
+# the real answer arrives later via brain.background_done — spec 13 §Purpose).
 _THINKING_ACK = "On it, sir — I'll think that through and ping you when I have something."
 
-# System prompt for the Sonnet summary of a finished opus job (spec 11 §on_done). The full
+# System prompt for the Sonnet summary of a finished opus job (spec 13 §on_done). The full
 # opus detail is persisted to Memory; the owner hears this short spoken summary.
 _SUMMARY_SYSTEM = (
     "You are EDITH. Summarize the following deep analysis for the owner in one or two spoken "
@@ -95,7 +95,7 @@ class RouterLike(Protocol):
 
 
 class BackgroundReasonerLike(Protocol):
-    """The slice of the BackgroundReasoner contract Brain uses (spec 11).
+    """The slice of the BackgroundReasoner contract Brain uses (spec 13).
 
     Injected so Brain stays decoupled from the reasoner's task machinery; the daemon wires the
     real ``BackgroundReasoner(router)``. Default None on Brain → no background, standalone.
@@ -164,7 +164,7 @@ class Brain:
         # miss proceeds straight to the model exactly as the pre-hook Brain
         # (keeps the existing tests green).
         self._resolve_repo = resolve_repo
-        # Background reasoner (spec 11). Default None -> Brain never backgrounds: the explicit
+        # Background reasoner (spec 13). Default None -> Brain never backgrounds: the explicit
         # "think about X" phrase falls through to the normal answer, and a deep-input turn just
         # answers live (no background pass) — standalone behavior, all existing tests green.
         self._reasoner = reasoner
@@ -186,7 +186,7 @@ class Brain:
         if await self._dispatch_skill(utterance):
             return
 
-        # 0b. EXPLICIT DEEP-WORK (spec 11): "think about X" → ack NOW, fire the deep opus
+        # 0b. EXPLICIT DEEP-WORK (spec 13): "think about X" → ack NOW, fire the deep opus
         # work in the background, and skip the normal live answer (the real answer arrives
         # later via brain.background_done). Only when a reasoner is wired; otherwise the
         # phrase falls straight through to the ordinary recall→answer path below.
@@ -233,7 +233,7 @@ class Brain:
         # 6. PUBLISH the decision
         await self._publish_decision(response.text)
 
-        # 6b. PASSIVE BACKGROUND (spec 11): the live turn already answered on Sonnet; if the
+        # 6b. PASSIVE BACKGROUND (spec 13): the live turn already answered on Sonnet; if the
         # OWNER'S INPUT itself is deep (a pasted log / long question — measured on the utterance
         # alone, NOT the accumulated context, so a long conversation never auto-fires opus on a
         # trivial turn), fire a background opus pass that reconsiders and pings a deeper answer.
@@ -314,7 +314,7 @@ class Brain:
         return on_done
 
     async def _summarize(self, detail: str) -> str:
-        """One short Sonnet summary of the opus result — the spoken ping (spec 11)."""
+        """One short Sonnet summary of the opus result — the spoken ping (spec 13)."""
         messages: list[dict[str, object]] = [
             {"role": "system", "content": _SUMMARY_SYSTEM},
             {"role": "user", "content": sanitize_text(detail)},
@@ -387,7 +387,7 @@ class Brain:
         self._memory.remember(nodes=[node])
 
     def _remember_background(self, utterance: str, detail: str) -> None:
-        """Persist the FULL opus result (spec 11): the spoken ping is only the summary, but
+        """Persist the FULL opus result (spec 13): the spoken ping is only the summary, but
         the deep detail is remembered so the next mention is an instant graph hit."""
         ts = str(time.time())
         text = sanitize_text(
@@ -430,7 +430,7 @@ def _redact(messages: list[dict[str, object]]) -> list[dict[str, object]]:
 def _is_deep_input(utterance: str) -> bool:
     """True when the owner's INPUT is large enough to be worth a background opus pass.
 
-    Measured on the utterance ALONE (spec 11 §passive trigger) — a pasted log / stack trace /
+    Measured on the utterance ALONE (spec 13 §passive trigger) — a pasted log / stack trace /
     long question, not accumulated conversation. Keying off the whole assembled context instead
     would auto-fire opus on every turn once a session's history+recall grew past the threshold —
     an unthrottled cost leak while Guard's budget is deferred. Reuses the Router's own

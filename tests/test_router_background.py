@@ -1,9 +1,18 @@
-"""Background reasoning — think_async (spec 11).
+"""Router background reasoning — ``supervised_reason`` (spec 12) + ``BackgroundReasoner`` (spec 13).
 
-The tracked, budget-gated, cancellable background-opus mechanism. No live Bifrost: a fake
-router whose ``model_call`` is gated on an ``asyncio.Event`` so the tests can prove the job is
-RUNNING *before* opus completes (non-blocking is the whole feature — completion-ordering alone
-would pass even for a blocking impl).
+Headless: fake routers that duck-type ``Router.model_call``. No httpx, no sleeps, no network.
+
+- ``supervised_reason`` (SYNCHRONOUS, awaited): a fast draft then a review pass that
+  critiques+improves it. The load-bearing property is that the review call is *prompted
+  with the draft* (draft text appears in the review payload) and the REFINED text is
+  returned — not a blind re-answer.
+- ``BackgroundReasoner.think_async`` (BACKGROUND): the tracked, budget-gated, cancellable
+  background-opus mechanism. Its fake router's ``model_call`` is gated on an ``asyncio.Event``
+  so the tests can prove the job is RUNNING *before* opus completes (non-blocking is the whole
+  feature — completion-ordering alone would pass even for a blocking impl).
+
+Spec 12's free-function ``think_async`` was SUPERSEDED by ``BackgroundReasoner`` (tracked +
+budget-gated + a real Brain consumer), so its three tests are gone with it.
 """
 
 from __future__ import annotations
@@ -13,7 +22,87 @@ import asyncio
 import httpx
 import pytest
 
-from edith.router import BackgroundJob, BackgroundReasoner, JobStatus, ModelResponse, Tier
+from edith.router import (
+    BackgroundJob,
+    BackgroundReasoner,
+    JobStatus,
+    ModelResponse,
+    Tier,
+    supervised_reason,
+)
+
+
+class QueuedRouter:
+    """Duck-types ``Router.model_call``. Records calls; returns queued responses in order."""
+
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[tuple[list[dict[str, object]], Tier, int]] = []
+
+    async def model_call(
+        self,
+        messages: list[dict[str, object]],
+        tier_hint: Tier,
+        max_tokens: int = 1024,
+    ) -> ModelResponse:
+        self.calls.append((messages, tier_hint, max_tokens))
+        return self._responses.pop(0)
+
+
+def _resp(text: str) -> ModelResponse:
+    return ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+
+# --------------------------------------------------------------------------- supervised_reason
+
+
+async def test_supervised_reason_makes_draft_then_review_at_right_tiers() -> None:
+    router = QueuedRouter([_resp("rough draft"), _resp("polished refined answer")])
+
+    result = await supervised_reason(
+        router,
+        [{"role": "user", "content": "explain X"}],
+    )
+
+    assert len(router.calls) == 2
+    draft_call, review_call = router.calls
+    assert draft_call[1] is Tier.SONNET  # draft on the fast tier
+    assert review_call[1] is Tier.OPUS  # review on the strong tier
+    # The refined (second) response is returned, not the draft.
+    assert result.text == "polished refined answer"
+
+
+async def test_supervised_reason_review_is_prompted_with_the_draft() -> None:
+    # The discriminator: the review pass must SEE the draft, else it just re-answers blind.
+    router = QueuedRouter([_resp("DRAFT-TOKEN-42"), _resp("refined")])
+
+    await supervised_reason(router, [{"role": "user", "content": "q"}])
+
+    review_messages = router.calls[1][0]
+    blob = "".join(str(m.get("content", "")) for m in review_messages)
+    assert "DRAFT-TOKEN-42" in blob  # the draft text reached the review payload
+    # The original user turn is still present too (review has full context).
+    assert "q" in blob
+
+
+async def test_supervised_reason_honors_custom_tiers_and_max_tokens() -> None:
+    router = QueuedRouter([_resp("d"), _resp("r")])
+
+    await supervised_reason(
+        router,
+        [{"role": "user", "content": "q"}],
+        draft_tier=Tier.HAIKU,
+        review_tier=Tier.SONNET,
+        max_tokens=256,
+    )
+
+    assert router.calls[0][1] is Tier.HAIKU
+    assert router.calls[1][1] is Tier.SONNET
+    assert router.calls[0][2] == 256
+    assert router.calls[1][2] == 256
+
+
+# ------------------------------------------------------------------ BackgroundReasoner.think_async
 
 
 class FakeOpusRouter:

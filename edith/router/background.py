@@ -1,19 +1,29 @@
-"""Background reasoning — ``think_async`` (spec 11).
+"""Background / two-agent reasoning over the Router (specs 12 + 13).
 
-The routing philosophy's centerpiece: **opus never blocks the live turn.** When Brain judges a
-turn deep enough for opus, it does NOT await opus inline (2–5 s of dead air); it fires a
-background job here and speaks/acks on Sonnet immediately. The job runs opus off the critical
-path and calls ``on_done`` when it lands, so Brain can summarize + ``remember`` + ping the owner.
+The north-star "two agents, fast masks slow" philosophy, made concrete as SEPARATE model
+calls — never one inference, never shared weights.
 
-This generalizes the fire-and-forget pattern in ``finder/resolve.py`` (``_deep_extract``) into a
-first-class, **tracked** mechanism: unlike that untracked ``create_task``, a ``BackgroundJob``
-exposes ``.status`` / ``.cancel()``, so its task is held in a registry (a detached task with no
-live reference can be GC'd mid-flight). The daemon owns shutdown via ``cancel_all()``.
+- ``supervised_reason`` (SYNCHRONOUS, awaited, spec 12): a fast draft then a strong review
+  pass that critiques+improves it, returning the REFINED response. Consumer: Brain's
+  deep-query path.
+- ``BackgroundReasoner.think_async`` (BACKGROUND, spec 13): **opus never blocks the live
+  turn.** When Brain judges a turn deep enough for opus, it does NOT await opus inline
+  (2–5 s of dead air); it fires a tracked background job here and speaks/acks on Sonnet
+  immediately. The job runs opus off the critical path and calls ``on_done`` when it lands,
+  so Brain can summarize + ``remember`` + ping the owner.
 
-Placement mirrors ``model_call_masked`` (spec 05 §Division of responsibility): Brain decides WHEN
-and supplies ``on_done``; the reasoner provides the mechanism (budget-gate → tracked opus task →
-notify). Budget is gated BEFORE the job starts — a denied opus job never runs (it does not silently
-downgrade to a pointless background Sonnet re-run, since Sonnet already answered the live turn).
+  This **supersedes spec 12's free-function ``think_async``**, which was a seam with no
+  production consumer and no tracking. It generalizes the fire-and-forget pattern in
+  ``finder/resolve.py`` (``_deep_extract``) into a first-class, **tracked** mechanism:
+  unlike an untracked ``create_task``, a ``BackgroundJob`` exposes ``.status`` /
+  ``.cancel()``, and its task is held in a registry (a detached task with no live reference
+  can be GC'd mid-flight). The daemon owns shutdown via ``cancel_all()``.
+
+Placement mirrors ``model_call_masked`` (spec 05 §Division of responsibility): Brain decides
+WHEN and supplies ``on_done``; the reasoner provides the mechanism (budget-gate → tracked
+opus task → notify). Budget is gated BEFORE the job starts — a denied opus job never runs
+(it does not silently downgrade to a pointless background Sonnet re-run, since Sonnet
+already answered the live turn).
 """
 
 from __future__ import annotations
@@ -25,15 +35,21 @@ from enum import Enum
 from itertools import count
 from typing import Protocol
 
-from edith.router.bifrost import MODEL_CALL_ERRORS, BudgetCheck, ModelResponse
+from edith.router.bifrost import (
+    _DEFAULT_MAX_TOKENS,
+    MODEL_CALL_ERRORS,
+    BudgetCheck,
+    ModelResponse,
+)
 from edith.router.tiers import Tier
-
-# Background opus can be long; give it more room than a live spoken reply.
-_DEFAULT_MAX_TOKENS = 1024
 
 
 class RouterLike(Protocol):
-    """The slice of the Router the reasoner needs (avoids a hard Router dependency)."""
+    """The slice of the Router both entry points need (avoids a hard Router dependency).
+
+    Structural, so a fake router in tests and the real ``Router`` satisfy it identically —
+    that is the point: no ``type: ignore`` at the call sites.
+    """
 
     async def model_call(
         self,
@@ -44,6 +60,37 @@ class RouterLike(Protocol):
 
 
 OnDone = Callable[[ModelResponse], Awaitable[None]]
+
+# Router-owned instruction for the review pass. The reviewer gets the full original context
+# plus the draft (folded in as the assistant turn) and is asked to critique+improve it —
+# it refines the draft, it does not re-answer blind.
+_REVIEW_INSTRUCTION = (
+    "Critique the draft answer above and produce an improved, final version. "
+    "Fix any errors, fill gaps, and tighten it. Return only the improved answer."
+)
+
+
+async def supervised_reason(
+    router: RouterLike,
+    messages: list[dict[str, object]],
+    *,
+    draft_tier: Tier = Tier.SONNET,
+    review_tier: Tier = Tier.OPUS,
+    max_tokens: int = _DEFAULT_MAX_TOKENS,
+) -> ModelResponse:
+    """Draft-then-review: a fast draft, then a strong critique+improve pass.
+
+    Two separate ``model_call``s (fast masks slow, spec 05). The draft is folded into the
+    review payload as an assistant turn so the reviewer refines it rather than re-answering
+    blind. Returns the REFINED response (the second call).
+    """
+    draft = await router.model_call(messages, draft_tier, max_tokens)
+    review_messages: list[dict[str, object]] = [
+        *messages,
+        {"role": "assistant", "content": draft.text},
+        {"role": "user", "content": _REVIEW_INSTRUCTION},
+    ]
+    return await router.model_call(review_messages, review_tier, max_tokens)
 
 
 class JobStatus(Enum):
@@ -58,7 +105,7 @@ class JobStatus(Enum):
 
 @dataclass
 class BackgroundJob:
-    """Handle to a background reasoning job (spec 11 §Interface).
+    """Handle to a background reasoning job (spec 13 §Interface).
 
     ``task`` is the underlying opus task (``None`` for a DENIED job that never started). It is a
     public field because ``cancel()``, the reasoner's shutdown sweep, and tests all legitimately
@@ -76,7 +123,7 @@ class BackgroundJob:
 
 
 class BackgroundReasoner:
-    """Fires and tracks background opus jobs (spec 11)."""
+    """Fires and tracks background opus jobs (spec 13)."""
 
     def __init__(
         self,
@@ -85,7 +132,9 @@ class BackgroundReasoner:
         budget_check: BudgetCheck = lambda _tier: True,
     ) -> None:
         self._router = router
-        # Guard seam (deferred slice): opus is the expensive tier → gate before starting.
+        # Guard seam: opus is the expensive tier → gate before starting. `edith/guard/guard.py`
+        # (merged, PR #17) is the intended injection here once the composition root constructs
+        # a Guard; the default stays permissive so nothing changes until it does.
         self._budget_check = budget_check
         self._tasks: set[asyncio.Task[None]] = set()
         self._ids = count(1)
