@@ -8,6 +8,14 @@
 Module: `edith/router/background.py`, exported from `edith.router`. Only these two router files
 were touched; Brain / edithd / voice consumers are lead-wired.
 
+> ⚠ **PARTIALLY SUPERSEDED (2026-07-25) — read `13-background-reasoning.md` for `think_async`.**
+> The free-function `think_async` documented below **no longer exists.** It was the seam version
+> (untracked `create_task`, no budget gate, `on_result=None` default, no consumer); spec 13's
+> `BackgroundReasoner.think_async` replaced it with a tracked, budget-gated, cancellable job that
+> Brain and the daemon actually consume. Everything here about **`supervised_reason` is still
+> current** — it survived unchanged, except that its `router` parameter is now typed against the
+> shared `RouterLike` Protocol rather than the concrete `Router`.
+
 ---
 
 ## `supervised_reason` — draft-then-review (SYNCHRONOUS, built + tested)
