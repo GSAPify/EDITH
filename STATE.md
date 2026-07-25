@@ -89,11 +89,18 @@ python -m edith.ingest --workspace ampmedia
 python -m edith.ingest --reembed                   # embed graph-only Facts (local, free)
 scripts/clone_workspace.sh patterninc              # optional: refresh shallow clones
 ```
-Design notes before building it: incremental skip already keys off `Repo.last_commit_date`; the
-metadata pass is model-free so a weekly run is ~free, but **deep extract is not** (Opus per repo) —
-gate any scheduled deep pass on Guard's budget, and don't schedule it across 1297 repos. It **must**
-not run while `edithd` holds the Kuzu handle (single-process) → either stop/start the daemon around
-it, or route ingest through the Control API. That contention is the real design decision here.
+Design notes before building it (verified against the code, not assumed):
+- **The `--workspace` metadata pass has NO incremental skip.** `edith/ingest/workspace.py` *writes*
+  `Repo.last_commit_date` (from the API's `pushed_at`) but never reads it to skip — its only skip is
+  `skipped_archived`. Every weekly run re-walks all 1297 repos. The clone-based ingest path is the
+  one with `last_commit_date` skip logic. Add the skip to `workspace.py`, or accept full re-walks.
+- **Model-free is not request-free.** 1297 repos of GitHub API calls per org per week — page it,
+  respect `X-RateLimit-Remaining`, and use `tenacity` for the 403/secondary-limit backoff rather
+  than a hand-rolled sleep loop. This shapes whether the job is one pass or throttled/chunked.
+- **Deep extract is NOT free** (Opus per repo) — gate any scheduled deep pass on Guard's budget and
+  do not schedule it across 1297 repos. The weekly job should be metadata + `--reembed` only.
+- **It must not run while `edithd` holds the Kuzu handle** (single-process) → either stop/start the
+  daemon around it, or route ingest through the Control API. That contention is the real decision.
 
 **3. Wire Guard in (it's built but injected nowhere).** `Narrator.budget_gate`,
 `Router.budget_check`, and every `edith/desktop` executor `authorize()` still default to ALLOW.
