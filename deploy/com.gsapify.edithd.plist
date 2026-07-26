@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  edithd user LaunchAgent — TEMPLATE (spec: EDITH operationalization item 1).
+
+  This file is a template, not a live config: it is NOT auto-loaded by anything
+  in this repo, and it contains NO secrets (launchd does not source .env — see
+  deploy/edithd-launcher.sh, which sources it before exec'ing the daemon).
+
+  Before use, replace the two placeholders below with real absolute paths:
+    __EDITH_REPO_DIR__  -> the absolute path where you cloned this repo
+                            (e.g. /Users/yourname/gitstuff/EDITH)
+    __EDITH_HOME_DIR__  -> your home directory, i.e. what `~` expands to
+                            (e.g. /Users/yourname) — launchd does not expand `~`
+  See deploy/README.md for the install runbook (bootstrap/bootout/status/logs)
+  and the operational consequences of making edithd always-on.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gsapify.edithd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__EDITH_REPO_DIR__/deploy/edithd-launcher.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__EDITH_REPO_DIR__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Crash-loop guard: don't respawn more than once per this many seconds. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__EDITH_HOME_DIR__/.edith/logs/edithd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__EDITH_HOME_DIR__/.edith/logs/edithd.err.log</string>
+</dict>
+</plist>
