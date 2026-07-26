@@ -18,6 +18,22 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${REPO_DIR}/.env"
 
 if [ -f "${ENV_FILE}" ]; then
+    # Refuse to source a .env that anyone else can read or write.
+    #
+    # `source` EXECUTES the file, so a group/world-writable .env is arbitrary code as the
+    # owner at every login. And a world-READABLE one leaks BIFROST_API_KEY to any other local
+    # account: verified on the build machine, where .env was 0644 and a second account (uid
+    # 501) could traverse to it. Checking here rather than only documenting it means the
+    # permission cannot silently drift back — a chmod regression fails loudly at boot instead
+    # of quietly re-exposing the key.
+    env_mode="$(stat -f '%OLp' "${ENV_FILE}")"
+    env_owner="$(stat -f '%u' "${ENV_FILE}")"
+    if [ "${env_owner}" != "$(id -u)" ] || [ "${env_mode}" != "600" ]; then
+        echo "[edithd] refusing to source ${ENV_FILE}: must be mode 600 and owned by" \
+             "$(id -un) (found mode ${env_mode}, uid ${env_owner}). Fix with:" \
+             "chmod 600 ${ENV_FILE}" >&2
+        exit 1
+    fi
     set -a
     # shellcheck disable=SC1090
     source "${ENV_FILE}"

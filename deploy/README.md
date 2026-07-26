@@ -77,6 +77,30 @@ here.
 
 1. Make sure the repo has a working venv at `.venv` (`uv sync` from the repo root) and a
    filled-in `.env` (copy `.env.example`, fill in real values, **never commit it**).
+
+   **Lock down the permissions — not committing it is not enough:**
+
+   ```
+   chmod 600 .env              # only you may read it
+   chmod 700 ~/.edith          # logs + graph live here
+   ```
+
+   Why this is a hard requirement and not hygiene advice: `edithd-launcher.sh` **sources**
+   `.env`, which *executes* it. A group- or world-**writable** `.env` is therefore arbitrary
+   code running as you at every login. A world-**readable** one hands `BIFROST_API_KEY` to
+   any other local account — on the machine this was built on, `.env` was `0644`, `~` was
+   group-`staff` traversable, and a second account (uid 501) could read it outright.
+
+   The launcher **refuses to start** unless `.env` is mode `600` and owned by you, so a chmod
+   regression fails loudly at boot instead of quietly re-exposing the key. If it exits with
+   `refusing to source …`, that check is doing its job.
+
+   **Logs are NOT redacted.** `sanitize_text` is the choke-point for model/TTS/bus payloads;
+   it does not run on log records. Python's `lastResort` handler sends WARNING+ to stderr,
+   which the plist captures permanently — e.g. transcript-tail errors from
+   `TranscriptCollector`. Treat `~/.edith/logs/` as sensitive and keep it `700`. They are also
+   **not rotated** — launchd will not do it, so they grow unbounded for an always-on daemon;
+   add a `newsyslog.d` entry if that matters to you.
 2. Copy the plist template into place and substitute both placeholders with real absolute
    paths — `__EDITH_REPO_DIR__` (where you cloned this repo) and `__EDITH_HOME_DIR__` (your
    `$HOME`, since launchd does not expand `~`):

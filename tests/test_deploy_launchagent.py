@@ -130,42 +130,52 @@ def test_wrapper_script_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_wrapper_actually_sources_env_into_the_daemons_environment(
-    tmp_path: Path,
-) -> None:
-    """RUN the wrapper against a stub repo and prove the .env reached the exec'd process.
-
-    Sourcing ``.env`` is the wrapper's entire reason to exist — launchd inherits no shell
-    environment, so if this block is ever dropped the daemon boots with no ``BIFROST_*`` and
-    (per ``daemon/__main__.py``) only *warns* before continuing: EDITH comes up, the menu bar
-    reads "running", and every reply silently fails.
-
-    A substring check over the file text cannot catch that — the header comment alone contains
-    "source", ".env" and "exec". This runs the real script instead: it self-locates its repo
-    from ``BASH_SOURCE``, so a stub tree with a fake ``.venv/bin/python`` that echoes the var
-    proves the value was exported. Delete the sourcing block and this dies.
-    """
+def _stub_repo(tmp_path: Path, env_mode: int) -> Path:
+    """A minimal repo tree the wrapper can self-locate into, with .env at ``env_mode``."""
     repo = tmp_path / "repo"
     (repo / "deploy").mkdir(parents=True)
     (repo / ".venv" / "bin").mkdir(parents=True)
-    (repo / ".env").write_text("EDITH_TEST_TOKEN=surfaced-from-dotenv\n")
-
+    env = repo / ".env"
+    env.write_text("EDITH_TEST_TOKEN=surfaced-from-dotenv\n")
+    env.chmod(env_mode)
     stub_python = repo / ".venv" / "bin" / "python"
     stub_python.write_text('#!/bin/bash\necho "TOKEN=${EDITH_TEST_TOKEN:-MISSING}"\n')
     stub_python.chmod(0o755)
-
     wrapper = repo / "deploy" / "edithd-launcher.sh"
     wrapper.write_text(_WRAPPER_PATH.read_text())
     wrapper.chmod(0o755)
+    return wrapper
+
+
+def test_wrapper_refuses_a_world_readable_env(tmp_path: Path) -> None:
+    """A 0644 .env must abort the boot, not leak the key.
+
+    `source` executes the file, so a writable .env is RCE as the owner at login; a readable
+    one hands BIFROST_API_KEY to any other local account. This was live on the build machine
+    (.env 0644, a second uid able to traverse to it). Documenting a chmod is not enough —
+    without this check the permission silently drifts back and nothing complains.
+    """
+    wrapper = _stub_repo(tmp_path, 0o644)
+
+    result = subprocess.run(
+        ["bash", str(wrapper)], capture_output=True, text=True, check=False, timeout=30
+    )
+
+    assert result.returncode == 1, "a world-readable .env must abort the boot"
+    assert "refusing to source" in result.stderr
+    assert "TOKEN=surfaced-from-dotenv" not in result.stdout  # never sourced
+
+
+def test_wrapper_accepts_a_correctly_locked_env(tmp_path: Path) -> None:
+    """0600 and owned by us — the check must not block the legitimate path."""
+    wrapper = _stub_repo(tmp_path, 0o600)
 
     result = subprocess.run(
         ["bash", str(wrapper)], capture_output=True, text=True, check=False, timeout=30
     )
 
     assert result.returncode == 0, result.stderr
-    assert "TOKEN=surfaced-from-dotenv" in result.stdout, (
-        f"the wrapper did not export .env into the exec'd process: {result.stdout!r}"
-    )
+    assert "TOKEN=surfaced-from-dotenv" in result.stdout
 
 
 def test_wrapper_execs_the_daemon_module() -> None:
