@@ -226,6 +226,44 @@ in `.env`/chat and used live this session.
 - ~~Establish `main` on GitHub.~~ **DONE (Session 11):** all branches consolidated into **`master`**
   (renamed from `main`), set as default, redundant branches deleted. Single-branch repo now.
 
+## Security review (Session 20) — 2 HIGH found, both addressed
+
+- **🔴 LIVE credential exposure — FIXED on the machine, and now enforced.** `.env` was `0644`
+  world-readable, `/Users/akhilsingh` is group-`staff` traversable, and a second local account
+  (**uid 501 `pattern`**) could read `BIFROST_API_KEY` + `ELEVENLABS_API_KEY` outright, no
+  escalation. Fixed immediately (`chmod 600 .env`, `chmod 700 ~/.edith`) and durably in PR #24:
+  `edithd-launcher.sh` now **refuses to boot** unless `.env` is mode 600 and owned by the
+  invoking user, so a chmod regression fails loudly instead of silently re-exposing the key.
+  Enforcing beats documenting — the old runbook said only "never commit it", and *permissions*
+  were what actually mattered. **⚠ OWNER DECISION: rotate both keys** if that account has ever
+  been reachable by anyone else. (This is the third standing reason to rotate — see §Blockers.)
+- **🔴 Guard's autonomy gate is INERT in every shipped config.** Verified empirically, not
+  inferred: `Intent` values are `{open_app, spotify, terminal, omc_launch}`, `_DEFAULT_DENYLIST`
+  is `{rm_rf, drop_table, force_push, shutdown, disk_wipe}` — **intersection EMPTY** — and
+  `needs_confirmation` is a `False` class constant, so `authorize()` provably returns ALLOW for
+  100% of desktop actions. `daemon/__main__.py` builds a bare `Guard()`. **Not a regression**
+  (there was no gate before #27), but do NOT read "Guard is wired" as "OS actions are gated".
+  The reachable exploit — `"open /tmp/evil.app"` → `open -a` executing an attacker-planted
+  bundle, reachable by anyone within earshot — **is fixed** in #27 by refusing bundle *paths*
+  (`"open Slack"` still works). Guard cannot catch that class at any denylist setting: it
+  matches the intent **verb**, never the argument.
+- **Filed, not built** (each changes semantics for every caller, so each is its own PR):
+  make `Guard.authorize` **default-deny** over its closed enum — the correct shape for a
+  4-value vocabulary; validate `spotify_cmd` (an unhandled `ValueError` from a bad classifier
+  reply escapes `Brain._dispatch_skill` and kills the turn); `Secrets.__repr__` exposes the key
+  (unreachable today, but `field(repr=False)` is one line).
+- **Logs are NOT redacted and NOT rotated.** `sanitize_text` is the choke-point for model/TTS/bus
+  payloads; it does not run on log records. Python's `lastResort` handler sends WARNING+ to
+  stderr — e.g. `TranscriptCollector` poll errors derived from tailing `~/.claude/projects` —
+  and PR #24's plist captures that **permanently**. Keep `~/.edith` at `700`; add a
+  `newsyslog.d` entry if unbounded growth matters.
+- **Verified clean:** no credential can reach the logs (`_amain`'s failed-creds warning prints
+  variable *names*; the key lives only in an `x-api-key` header and Python tracebacks don't
+  render locals); the desktop gate is correctly placed and **unbypassable** (both the regex and
+  haiku-classifier paths hit `_authorize` before every executor); `on_usage` carries two ints so
+  it cannot bypass redaction; AppleScript escaping is correct; SQL/Cypher are parameterized; no
+  `shell=True` anywhere. **#25 and #26 had no security findings.**
+
 ## Known limitations
 
 - ~~**EDITH is not actually always-on (Session 19).**~~ **ADDRESSED Session 20 (PR #24)** — the
