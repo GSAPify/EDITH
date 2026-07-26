@@ -38,9 +38,39 @@ def test_build_app_without_rumps_raises_actionable_import_error():
 def test_main_without_rumps_prints_actionable_message_and_returns_nonzero(capsys):
     from edith.menubar.__main__ import main
 
-    exit_code = main()
+    exit_code = main([])
 
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert "[menubar]" in captured.out
-    assert "menubar" in captured.out
+    # Assert the INSTRUCTION, not the "[menubar]" log prefix — matching the prefix passes
+    # even if the message is gutted to "rumps not installed", losing the one thing the
+    # user needs. The install command is what makes it actionable.
+    assert "uv pip install" in captured.out
+    assert ".[menubar]" in captured.out
+
+
+def test_default_socket_path_tracks_the_daemons_derivation(monkeypatch):
+    """The menu bar must resolve the same socket edithd binds, not a re-spelled literal.
+
+    edithd builds ``data_dir / _SOCKET_NAME`` from its ``--data-dir``. A hardcoded
+    ``~/.edith/data/edithd.sock`` here would silently poll a dead path the moment the owner
+    runs the daemon elsewhere, and ``refresh()`` renders that identically to "not running" —
+    a misconfiguration indistinguishable from a stopped daemon, forever.
+    """
+    from edith.daemon.edithd import _SOCKET_NAME
+    from edith.menubar import app
+
+    monkeypatch.setenv("EDITH_DATA_DIR", "/Volumes/enc/edith")
+    assert app.default_socket_path() == f"/Volumes/enc/edith/{_SOCKET_NAME}"
+
+    monkeypatch.delenv("EDITH_DATA_DIR", raising=False)
+    assert app.default_socket_path().endswith(f"/.edith/data/{_SOCKET_NAME}")
+
+
+def test_main_maps_data_dir_to_the_daemon_socket(capsys):
+    """``--data-dir`` must reach ``build_app`` — the override was previously unreachable."""
+    from edith.menubar.__main__ import main
+
+    # rumps is absent, so build_app raises; the message proves we got that far with our path.
+    assert main(["--data-dir", "/Volumes/enc/edith"]) == 1
+    assert "[menubar] cannot start" in capsys.readouterr().out

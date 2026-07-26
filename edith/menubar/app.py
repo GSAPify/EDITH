@@ -19,11 +19,23 @@ import asyncio
 import os
 
 from edith.daemon.client import ControlClient
+from edith.daemon.edithd import _SOCKET_NAME
 from edith.menubar.controller import NOT_RUNNING_LABEL, MenuBarController
 
-# Mirrors edith/daemon/edithd.py's _SOCKET_NAME under the default data dir.
-_DEFAULT_SOCKET = os.path.expanduser("~/.edith/data/edithd.sock")
+# Must match how edithd derives its socket: data_dir / _SOCKET_NAME (edithd.py:168),
+# where data_dir comes from --data-dir / EDITH_DATA_DIR. Importing the name rather than
+# re-spelling the path is deliberate — a literal here silently drifts the moment the owner
+# runs the daemon with a non-default --data-dir (e.g. the encrypted volume that
+# securestore.py's TODO is heading toward), and the menu bar would then poll a dead path
+# and render it as "not running" forever, indistinguishable from a stopped daemon.
+_DEFAULT_DATA_DIR = "~/.edith/data"
 _POLL_SECONDS = 3
+
+
+def default_socket_path() -> str:
+    """The socket edithd listens on, honouring ``EDITH_DATA_DIR`` exactly as the daemon does."""
+    data_dir = os.environ.get("EDITH_DATA_DIR", _DEFAULT_DATA_DIR)
+    return os.path.join(os.path.expanduser(data_dir), _SOCKET_NAME)
 
 
 def _require_rumps():
@@ -41,7 +53,7 @@ def _require_rumps():
 def build_app(socket_path: str | None = None):
     """Construct the ``rumps.App`` instance. Raises ``ImportError`` if ``rumps`` is missing."""
     rumps = _require_rumps()
-    controller = MenuBarController(ControlClient(socket_path or _DEFAULT_SOCKET))
+    controller = MenuBarController(ControlClient(socket_path or default_socket_path()))
 
     class EdithMenuBarApp(rumps.App):
         def __init__(self) -> None:
@@ -81,7 +93,7 @@ def build_app(socket_path: str | None = None):
     return EdithMenuBarApp()
 
 
-def main() -> int:
+def main(socket_path: str | None = None) -> int:
     """Build and run the menu-bar app. Owner LIVE-SMOKE — never called by tests."""
-    build_app().run()
+    build_app(socket_path).run()
     return 0
