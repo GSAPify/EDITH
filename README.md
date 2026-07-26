@@ -166,9 +166,15 @@ and owned by you, so a permission regression fails loudly instead of silently re
 A separate process that talks to the running daemon over its unix socket:
 
 ```bash
+source .venv/bin/activate      # REQUIRED: uv installs into .venv, but a bare `python`
+                               # on PATH is a different interpreter and won't see rumps
 uv pip install -e '.[menubar]'
 python -m edith.menubar        # --data-dir if the daemon uses a non-default one
 ```
+
+If you see `[menubar] cannot start: the menu-bar app needs the 'rumps' package` right after
+installing it, that is this exact mismatch — `which python` is not `.venv/bin/python`. Either
+activate the venv or run `.venv/bin/python -m edith.menubar` directly.
 
 Pause / resume / kill plus a status label. `edith/daemon/client.py` drives the same Control API
 from the CLI if you prefer that.
