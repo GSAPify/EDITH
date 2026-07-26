@@ -412,3 +412,24 @@ async def test_narrator_degrades_to_its_template_instead_of_going_quiet() -> Non
 
     assert router.calls == []  # no model call once the budget is gone
     assert speaker.said == ["Something errored in edith."]  # but she still speaks
+
+
+async def test_open_app_refuses_a_bundle_path_but_allows_a_name() -> None:
+    """"open /tmp/evil.app" must not execute an attacker-planted bundle.
+
+    Guard's denylist matches the intent verb ("open_app"), never the argument, so it cannot
+    catch this — `open -a` accepts an absolute bundle path and runs it with the owner's
+    privileges, reachable by anyone within earshot of the mic. Rejecting paths (not
+    allowlisting names) removes the arbitrary-executable primitive while keeping normal use.
+    """
+    runner = _RecordingRunner()
+    skill = DesktopControlSkill(runner=runner, guard=Guard())
+
+    for hostile in ("open /tmp/evil.app", "open /Users/pattern/Downloads/payload.app"):
+        result = await skill.run(SkillContext(utterance=hostile, memory=_FakeMemory()))
+        assert result.handled
+        assert not runner.calls, f"{hostile!r} reached the executor: {runner.calls}"
+
+    await skill.run(SkillContext(utterance="open Spotify", memory=_FakeMemory()))
+    assert runner.calls, "a plain app name must still open"
+    assert "Spotify" in runner.calls[0]

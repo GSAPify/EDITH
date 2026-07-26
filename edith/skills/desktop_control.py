@@ -161,6 +161,18 @@ class DesktopControlSkill:
 
     async def _open_app(self, action: DesktopAction) -> SkillResult:
         app = action.app or ""
+        # Refuse a bundle PATH, accept a bundle NAME.
+        #
+        # `_OPEN_APP`'s `(.+?)` captures anything after "open", and `open -a` happily takes an
+        # absolute path — so "open /tmp/evil.app" executes an attacker-planted bundle with the
+        # owner's privileges, reachable by anyone within earshot of the mic. Guard's denylist
+        # cannot catch this: it matches the *intent* verb ("open_app"), never the argument.
+        # Rejecting paths rather than allowlisting app names keeps "open Slack" working while
+        # removing the arbitrary-executable primitive, which is the part that is dangerous.
+        if "/" in app or app.startswith("."):
+            return await self._speak_result(
+                f"Sorry sir, I'll only open apps by name, not by path — not {app}."
+            )
         rc, _out = await launch_app(app, runner=self._runner)
         if rc != 0:
             return await self._speak_result(f"Sorry sir, I couldn't open {app}.")
