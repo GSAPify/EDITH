@@ -3,7 +3,7 @@
 > Machine-and-human readable status. Update this at the end of every session (or at ~90% context).
 > This is the first file a new session reads after `SESSION-PROTOCOL.md`.
 
-**Current phase:** Slices 0–6 DONE + Viewer + Ingest + NL-finder + Workspace-graph + voice conversation mode + **daemon composition root ("she talks back", Session 18)** + **Guard / router-background seam / `Memory.compact()` (Session 19, PRs #17–#19 merged)**. **ALL NUMBERED SLICES BUILT + all three long-standing deferred seams closed.** What remains is NOT slice work — it is **operationalization** (see §Next action): EDITH is a hand-started foreground process, not an always-on daemon, and nothing keeps the graph fresh on a schedule.
+**Current phase:** Slices 0–6 DONE + Viewer + Ingest + NL-finder + Workspace-graph + voice conversation mode + **daemon composition root ("she talks back", Session 18)** + **Guard / router-background seam / `Memory.compact()` (Session 19, PRs #17–#19 merged)**. **ALL NUMBERED SLICES BUILT + all three long-standing deferred seams closed.** **Session 20 (2026-07-27) then built all four operationalization items — launchd, Guard wiring, menu-bar, weekly refresh (PRs #24–#28, 408 passed together).** What remains is owner LIVE-SMOKE plus the follow-ups listed in §Next action (no SIGTERM handler; silence during refresh; ASK unreachable for desktop).
 **Session 19 (2026-07-25) — three deferred seams merged.** `master` = `3131d33`. **PR #17 Guard** (`edith/guard/guard.py`: pure `authorize`/`Decision` + windowed token budget, north-star §6 — policy object only, **not yet injected into any subsystem**; every `authorize()`/`budget_check` seam still defaults to ALLOW). **PR #18 router background** (`edith/router/background.py`: `supervised_reason` draft→review, fully consumable; `think_async` free function = **seam only, no production consumer**). **PR #19 `Memory.compact()`** (bounded conv-Fact eviction in `store.py` + `vector.py`). **332 passed, 2 skipped on master; `ruff check .` has 3 pre-existing SIM115 in `scripts/sagemaker/train_hey_edith.py` (non-`edith/`, predates these merges) — `edith/` + `tests/` are clean.** **PR #20** (`feat/router-background-opus`, `BackgroundReasoner` + Brain triggers + daemon wiring — background opus WITH a real consumer) collided with #18 on `edith/router/background.py`, `edith/router/__init__.py`, `tests/test_router_background.py` (all "added/changed in both") plus a spec-number clash with `11-guard.md`. **RESOLVED 2026-07-25 (merge commit on the branch; PR #20 now MERGEABLE/CLEAN, 348 passed / 2 skipped):** #20's tracked, budget-gated `BackgroundReasoner.think_async` **supersedes** #18's free-function `think_async` (which was self-documented as "the seam, not the finished feature" — untracked, un-gated, no consumer); #18's `supervised_reason` **survives unchanged**, now typed against the shared `RouterLike` Protocol so both entry points use one seam. Its spec renumbered `11-background-reasoning.md` → **`13-background-reasoning.md`**, `12-router-background.md` carries a PARTIALLY-SUPERSEDED banner, and all 18 in-code "spec 11" references were renumbered to 13 (they would otherwise point at the Guard spec). **Merge order: #20 first, then this docs PR (#21).**
 **Session 18 (2026-07-17) — daemon composition root** on branch `feat/daemon-composition-root` (spec 10, **PR #16, merged**). `python -m edith.daemon` boots the full daemon with a real `VoiceIO` on a shared bus → the graph-backed Brain answers voice with semantic recall + cross-session memory + all skills. Brain gained injectable `system_preamble`/`answer_max_tokens` + a **model-error seam** (catches `MODEL_CALL_ERRORS`, speaks an apology instead of going silent); daemon subscribes `brain.decision`→`voice.speak` (plain-answer path only, no double-speak); shared `edith/voice/persona.py`; injected `bus`. Tightened both `MemoryLike` protocols' `remember(edges)` to `list[Edge]` so a real `VectorMemoryStore` type-checks into the daemon. **302 tests, ruff + pyright clean.** `__main__` + live loop are owner-smoke; mic shutdown is Ctrl-C/process-exit (to_thread loop doesn't cancel). See `docs/specs/10-daemon-composition.md` §Completion Record.
 **Active slice:** → all numbered slices done + voice conversation mode done. Session 16 (2026-07-12): built **Slice 6 (Desktop control)** advisor-first + TDD on branch `feat/slice-6-desktop-control` (**PR #13, merged**) — `edith/desktop/` (regex `parse_command` + filesystem `RepoResolver` + osascript/`open` executors behind an injected `Runner` seam) + `DesktopControlSkill` registered LAST in edithd's Brain. 264 tests + 2 skipped, ruff/pyright clean (code-reviewer REQUEST_CHANGES round folded in: return-code error path, Spotify escaping, hyphenated-repo parse, and a new `SkillResult.handled` flag so a broad-trigger skill can decline a turn and Brain falls through to the answer loop instead of dead-ending). Terminal.app `do script` drives BOTH the visible-terminal and the OMC-launch paths (claude is an interactive TTY REPL, won't run headless under `Popen` — spec Option-C deviation). `RepoResolver` prefers the flat `~/gitstuff/<name>` over the org-nested duplicate (bulk-clone artifact, verified identical remote); same-depth collisions still ASK. Safe live checks: parsed all spec examples, `osacompile`d the AppleScript clean, resolver ran against the real 1400-repo tree. **Owner LIVE-SMOKE of actual OS actions (Spotify/Terminal/OMC) still pending.** Prior that session: multi-org workspace graph (PR #10), voice self-echo/persona fixes (PRs #8/#12), SageMaker `hey_edith` retrain, Router Slice 5 (PR #7).
@@ -29,7 +29,7 @@ remote branches (`build/slice-3-voice`, `docs/readme-refresh`, `feat/daemon-comp
 | 4 | Session awareness | ✅ done | ✅ done | `edith/session/`: **spike** (transcript-tail confirmed on the live machine — see `scratch/spike_session_tap_findings.md`) → **TranscriptCollector** (dep-free EOF-seek poller of `~/.claude/projects/**/*.jsonl`; primes to EOF so history is NOT replayed) → **SessionBus** (normalize→classify→**REDACT choke-point**→`session.event`/`session.state` + in-mem states map + Control API `last_event`) → **Narrator** (3-class policy: silent / spoken-local template / model-gated haiku; idle via `tick()`) → **SessionQuerySkill** ("what is session 2 doing?" via Brain dispatch, phrase triggers). edithd wires it all (`enable_session_awareness` flag gates the live tail off in tests). Hardened `sanitize_text` with a **connection-URI password** pattern (the killer-demo leak). **35 new tests (196 total +1 skipped), ruff/pyright clean.** LIVE-smoked on real transcripts: 11.7k events classified, real pasted Snowflake/Postgres creds → `[REDACTED]`, 0 leaks. **Cost gate (spec #5): per-session error-narration cooldown** — measured 452→72 model calls over the real stream (~0.6/session); Guard's real budget still deferred. Deviations (documented): Narrator is a collaborator (not in Brain); collector polls (not watchdog). |
 | 5 | Router | ✅ done | ✅ done | `edith/router/`: `tiers.py` (`resolve_tier` + `TaskType`; owns the `Tier` enum now) — latency-first policy (Sonnet=live voice, Haiku=acks, Opus=explicit/background), override rules (ACK_FILLER→Haiku, HAIKU→Sonnet on size, OPUS budget-gated→Sonnet+`budget_limited`, deep signal→Sonnet+`suggest_background`). `bifrost.py`: `model_call_stream` (Anthropic SSE→`ModelChunk`), **`model_call_masked`** (tier-parameterized, answer defaults SONNET not opus; TRUE overlap — both requests fire before draining), `budget_check`+`redactor` seams, **redaction choke-point inside every `model_call*`**. Non-streaming POST unchanged (callers untouched). **17 new tests (212 total +1 skipped), ruff/pyright clean.** LIVE-smoked: `model_call_stream` vs REAL Bifrost yielded real tokens (SSE parser verified against actual stream). **Session 19 update (PR #18):** `edith/router/background.py` now ships `supervised_reason` (draft Sonnet → Opus critique+improve, awaited, consumable) + a `think_async` free function. **Still UNMET:** `think_async` has **no production consumer** (nothing speaks a ~20 s-late answer through the voice half-duplex gate / cooldown / conversation-window), and `resolve_tier`'s `suggest_background` flag is still returned-but-unacted — that's exactly what open **PR #20** builds (and why it's worth resolving rather than closing). Masking still has no live consumer (needs VoiceIO `speak_stream`); OpenAI provider-swap config-only. |
 | 6 | Desktop control | ✅ done | ✅ done | `edith/desktop/` (parser + `RepoResolver` + executors behind an injected `Runner` seam) + `DesktopControlSkill` (registered LAST in edithd, `needs_confirmation=False`, AUTO-only). "open Spotify", "play X on Spotify", "pause/skip/volume", "open a terminal in <repo>", "start OMC in <repo>". Terminal.app `do script` for terminal AND OMC (claude=interactive TTY, no headless Popen — Option-C deviation). RepoResolver: filesystem-first + difflib, prefers flat over org-nested dup. Code-reviewed (REQUEST_CHANGES → all findings fixed: false-success on non-zero exit, escaping, hyphen-parse, dispatch dead-end via new `SkillResult.handled`). **264 tests, ruff/pyright clean.** Safe live: parsed spec examples, osacompiled AppleScript clean, resolver vs real ~/gitstuff. Owner OS live-smoke pending. |
-| — | Guard (autonomy + budget) | (11) | ✅ built, ⚠ not wired | PR #17. `edith/guard/guard.py`: pure policy object — `authorize(action, needs_confirmation) → Decision{ALLOW,ASK,DENY}` (denylist) + windowed token budget (`token_budget`, `window_seconds`, injected `clock`). No I/O, no model calls, no bus → trivially testable, construct once + inject. Does NOT duplicate redaction (§6.1 stays with `sanitize_text` at the Router choke-point). **134 test lines / suite green.** ⚠ **Nobody constructs it yet:** `Narrator.budget_gate`, `Router.budget_check`, and every desktop executor's `authorize()` still default to ALLOW. Wiring it in is the follow-up — see §Next action. |
+| — | Guard (autonomy + budget) | (11) | ✅ built, ⚠ not wired | PR #17. `edith/guard/guard.py`: pure policy object — `authorize(action, needs_confirmation) → Decision{ALLOW,ASK,DENY}` (denylist) + windowed token budget (`token_budget`, `window_seconds`, injected `clock`). No I/O, no model calls, no bus → trivially testable, construct once + inject. Does NOT duplicate redaction (§6.1 stays with `sanitize_text` at the Router choke-point). **134 test lines / suite green.** ~~⚠ Nobody constructs it yet~~ **WIRED in Session 20 (PR #27):** one Guard per daemon in the composition root → `Router.budget_check`, `BackgroundReasoner`, `Narrator.budget_gate` (adapted — it's a no-arg `Callable[[], bool]`, bound to `Tier.HAIKU`), `control.py`'s `BudgetView` (so the menu bar shows real usage), **plus a NEW gate call site in `DesktopControlSkill`** — there was never an `authorize()` seam in `edith/desktop/`, contrary to what this file used to say. The charge path is the crux and it is closed: a new `on_usage` seam on `Router` calls `Guard.record` from `model_call` and `model_call_stream`; `model_call_masked` delegates to both so it is charged twice for its two billing events and **must not** get a third call site. **Safety property, verified: `budget_check` is only ever called with `Tier.OPUS` (`bifrost.py:229`, `background.py:156`) plus HAIKU for narration — nothing gates the live conversational path, so exhaustion downgrades opus→Sonnet and drops narration to a local template but EDITH cannot go mute.** |
 | — | `Memory.compact()` | (01 seam) | ✅ done | PR #19. Bounded conversation-Fact eviction across `edith/memory/store.py` + `vector.py` (graph rows AND their sqlite-vec embeddings, so compaction can't leave orphaned vectors). Closes the oldest seam in the repo (deferred since Slice 1). Not yet called on a schedule by the daemon. |
 | — | Memory viewer | (07) | ✅ done | Offline local graph viewer: `MemoryStore.graph_snapshot()` + `edith/viewer/` (stdlib 127.0.0.1 server, vendored force-graph UMD, `--demo` seeder, `python -m edith.viewer`). **70 tests + 1 live-skipped, ruff/pyright clean.** Zero new runtime deps. Reads live Memory; repo ingestion populates it for real. |
 | — | Repo ingestion | (08) | ✅ done | `edith/ingest/` populates the LIVE graph from local `patterninc` clones: discover→fetch→**REDACT (choke-point)**→Sonnet classify/Opus deep→map→`remember`. `python -m edith.ingest [--dry-run] [--repos] [--limit] [--data-dir] [--max-tokens]`, incremental skip on `Repo.last_commit_date`, secret-safe status report, one-time global `~/.claude/CLAUDE.md` owner context. Additive schema (`Repo` +4 cols, `Fact.source`, `authored_by` Repo→Person). **97 tests + 1 live-skipped, ruff/pyright clean.** Live smoke: 58 nodes to a temp dir, secret-scan clean. Full contributed-repos run is orchestrator-gated pending review. |
@@ -65,10 +65,69 @@ Single subsystems still run standalone: `python -m edith.voice` (voice only, no 
 `python -m edith.viewer`, `python -m edith.finder "…"`, `python -m edith.session`,
 `python -m edith.ingest`. **Only ONE of these may hold `memory.kuzu` at a time.**
 
-### ▶ NEXT — operationalization, not slices (START HERE)
+### ▶ NEXT — after Session 20, all four operational items are BUILT (PRs #24–#28)
+
+**Session 20 (2026-07-27) shipped all four**, fanned out to parallel agents in isolated worktrees.
+Verified merged together: **408 passed, 2 skipped**, `ruff check edith tests` clean.
+`348 base + 13 (#24) + 23 (#25) + 0 (#26, refactor) + 13 (#27) + 11 (#28) = 408.`
+
+| PR | Item | Owner LIVE-SMOKE still needed |
+|----|------|-------------------------------|
+| #24 | launchd LaunchAgent (`deploy/`) | `launchctl bootstrap`, survives logout/login |
+| #25 | menu-bar app (`edith/menubar/`) | rendering, `rumps.timer` poll, confirm dialog |
+| #26 | recovered stranded `compact()` review fix | — |
+| #27 | Guard wired into all five gates | budget behaviour in a real session |
+| #28 | weekly refresh scheduled in-process | a real ~1.3-min pass against the live graph |
+
+**⚠ Merge caveat:** #27 and #28 both add an import at the same line of `edith/daemon/edithd.py`.
+Whichever merges **second** hits a two-line conflict — **keep both imports**. Verified: the resolved
+combination is the 408-passing tree above. Not a design conflict.
+
+**Two corrections to what this file previously claimed** (both were mine, both verified against code):
+
+1. ~~"1297 repos of GitHub API calls per org per week — respect `X-RateLimit-Remaining`"~~ **WRONG.**
+   `_gh_list_repos` (`workspace.py:113`) is one `gh api orgs/<org>/repos?per_page=100 --paginate` —
+   **~13 calls for patterninc, 1 for ampmedia**, against 5000/hr. Rate limiting is a non-issue and
+   no throttling was built. The real cost is ~1300 serial Kuzu writes, **benchmarked at 54 ms/repo
+   → ~1.3 min for 1378 repos**. `tenacity` still went on that `subprocess.run(check=True)` — for
+   *flakiness*, not rate limits. The `last_commit_date` skip is therefore a **lock-duration**
+   optimisation, not a cost control (still not built — its own PR).
+2. ~~"every `edith/desktop` executor's `authorize()` defaults to ALLOW"~~ **There was no such seam.**
+   `grep -rn "authorize\|Decision" edith/desktop/` was empty; `DesktopControlSkill` ran every parsed
+   OS action ungated. #27 **added** the call site rather than injecting into one.
+
+**The Kuzu lock contract** (verified by code-read in #24, with line citations in
+`docs/specs/01-memory-brain.md`) — this is what decided #28's design:
+- **`pause` does NOT release the handle.** `RuntimeState.pause()` (`state.py:48-51`) flips an enum
+  and never touches `self._memory`.
+- Released only by `MemoryStore.close()` (`store.py:391-394`) ← only `EdithDaemon.stop()`
+  (`edithd.py:361-402`) ← only a Control API `kill` or Ctrl-C.
+- Under launchd `KeepAlive`, `kill` → instant respawn → lock re-taken. **`launchctl bootout` is the
+  only way to free the graph** for viewer/finder/ingest. That is a real usability regression of
+  going always-on, documented in `deploy/README.md`.
+- So "stop the daemon around a scheduled ingest" loses, and #28 schedules it **in-process**.
+
+**Still open after Session 20** (each its own item, none smuggled into the PRs above):
+- **No `SIGTERM`/`SIGINT` handler** (`grep -rn "add_signal_handler\|signal\." edith/` is empty), so
+  `launchctl bootout` is an *ungraceful* stop — `compact()` and `close()` never run. Wants a signal
+  handler plus a `KeepAlive` policy distinguishing intentional stop from crash.
+- **During a refresh EDITH ignores turns silently** — #28 folds the refresh flag into `is_paused`
+  rather than taking a cross-thread lock, so a live turn is skipped entirely (no reply, not even an
+  apology) for ~1.3 min/week. Deliberate (avoids a new deadlock class); revisit if it grates.
+- **`BackgroundReasoner.on_done` and `finder/resolve.py::_deep_extract`** write the same Memory
+  handle without checking `is_paused`, so they can still race #28's worker thread.
+- **ASK is unreachable for desktop control.** #27 maps ASK→DENY fail-closed, but nothing sets
+  `needs_confirmation=True` on that skill, so only the denylist bites. A real voice-confirm
+  ("should I?" → listen) is what would make ASK mean something — `PRReviewSkill`'s `Confirm`
+  callable defaults to `_deny` and the daemon wires that default, so no such path exists anywhere.
+- `last_commit_date` incremental skip; routing all Kuzu access through `edithd`.
+
+---
+
+#### Historical — the four items as they stood before Session 20 (kept for context)
 
 All numbered slices are built and all three long-standing seams merged (#17/#18/#19). The gap between
-"the code works" and "EDITH is the always-on presence in `00-north-star.md`" is now **four operational
+"the code works" and "EDITH is the always-on presence in `00-north-star.md`" was **four operational
 items, none of which is a new slice.** Ordered by payoff:
 
 **1. Always-on `edithd` (launchd).** Today EDITH only exists while a terminal holds
@@ -169,21 +228,36 @@ in `.env`/chat and used live this session.
 
 ## Known limitations
 
-- **EDITH is not actually always-on (Session 19).** She exists only while a terminal holds
-  `python -m edith.daemon`. No launchd job, no `deploy/*.plist` (the spec-01 claim that one shipped
-  is wrong — no `.plist` exists in the repo or its history), no login-item, no menu-bar surface.
-  Every "ambient / always-on presence" claim in `README.md` and `00-north-star.md` is design intent,
-  not current behavior.
-- **The graph does not refresh itself (Session 19).** No cron / launchd / scheduler anywhere; no
-  weekly (or any) automated `--workspace` pass. `~/.edith/data/memory.kuzu` was last written
-  **2026-07-12** and drifts from the 1378 real repos every day it isn't re-run by hand. The
-  blocker to automating it is the Kuzu single-process limitation below (a scheduled ingest and a
-  running `edithd` cannot both hold the handle).
-- **Guard exists but gates nothing (Session 19).** `edith/guard/guard.py` is built and tested; no
-  subsystem constructs it, so `authorize()`/budget seams still default to ALLOW everywhere.
-- **`README.md` is stale.** Its status table still shows Slice 5 as "⬜ next" and Slice 6 unstarted,
-  quotes 196 tests, and lists "No `edithd` composition root" under Known gaps — all superseded.
-  Refresh it alongside the next merge (its own small PR).
+- ~~**EDITH is not actually always-on (Session 19).**~~ **ADDRESSED Session 20 (PR #24)** — the
+  LaunchAgent template, env wrapper and runbook now exist in `deploy/`. Still true until the owner
+  runs `launchctl bootstrap`: **that step is unverified**, and nothing here proves the daemon starts
+  correctly under real launchd. Most likely first-run failure, with its log signature documented:
+  `python -m edith.daemon` always builds a real `VoiceIO` and exits 1 without the `[voice]` extra,
+  which under `KeepAlive` becomes a 10-second respawn loop in `~/.edith/logs/edithd.err.log`.
+- ~~**The graph does not refresh itself (Session 19).**~~ **ADDRESSED Session 20 (PR #28)** — the
+  daemon now schedules the model-free passes in-process, **off by default** behind
+  `enable_graph_refresh`. Never deep-extracts. Still unverified against the live graph, and the
+  graph is still at its 2026-07-12 write until someone enables it.
+- ~~**Guard exists but gates nothing (Session 19).**~~ **ADDRESSED Session 20 (PR #27)** — see the
+  Guard row in the slice table. Caveat that survives: only the **denylist** actually bites for
+  desktop control, since nothing sets `needs_confirmation=True` on that skill.
+- **A stranded-commit pattern has now bitten twice.** Session 17 lost `458f77f`; Session 20 found
+  `2227b73` (a `compact()` review fix — a broad `except Exception` around a sqlite prune, and a
+  duplicated selection query across both `compact()`s) sitting unmerged on `feat/memory-compact`
+  **after its PR #19 had merged**. Recovered as PR #26. Mechanism is always the same: an agent keeps
+  committing to a branch after its PR merges. **Fix: delete merged branches promptly** — 16 are
+  merged and fully accounted for. A full content-not-hash sweep of all 8 branches carrying unmerged
+  commits found exactly one real loss; the rest were cherry-picked recoveries or renamed symbols
+  that only *look* stranded under ancestry checks.
+- **`uv run pytest` cannot resolve on this machine.** A locally-installed **Python 3.14** makes
+  `edith[voice]`'s `onnxruntime<1.20` pin conflict with `fastembed`'s marker split for
+  `python_full_version >= 3.14`. **Pre-existing** — reproduces on bare `origin/master`. Use
+  `uv run --frozen`, or `.venv/bin/python -m pytest` directly.
+- ~~**`README.md` is stale.**~~ **FIXED (PR #23, merged 2026-07-26):** slices 0–6 all ✅ plus rows for
+  the daemon root, Guard, background reasoning and `compact()`; `python -m edith.daemon` leads the
+  "Running it" section; Known gaps rewritten around the real four. **It will go stale again the
+  moment #24–#28 merge** — its Known-gaps section still says there is no launchd job, no scheduler,
+  no menu-bar app, and that Guard gates nothing. Refresh it in the same pass that merges them.
 - **Kuzu embedded is single-process (Session 10).** The viewer, finder, and ingest each open
   `memory.kuzu` directly and contend on the on-disk file lock — only ONE may hold it at a time
   (running `--reembed` requires no other EDITH process on the DB). The production fix is routing
