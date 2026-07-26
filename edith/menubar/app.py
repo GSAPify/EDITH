@@ -19,15 +19,22 @@ import asyncio
 import os
 
 from edith.daemon.client import ControlClient
-from edith.daemon.edithd import _SOCKET_NAME
 from edith.menubar.controller import NOT_RUNNING_LABEL, MenuBarController
 
-# Must match how edithd derives its socket: data_dir / _SOCKET_NAME (edithd.py:168),
-# where data_dir comes from --data-dir / EDITH_DATA_DIR. Importing the name rather than
-# re-spelling the path is deliberate — a literal here silently drifts the moment the owner
-# runs the daemon with a non-default --data-dir (e.g. the encrypted volume that
-# securestore.py's TODO is heading toward), and the menu bar would then poll a dead path
-# and render it as "not running" forever, indistinguishable from a stopped daemon.
+# Must match how edithd derives its socket: data_dir / _SOCKET_NAME (edithd.py), where
+# data_dir comes from --data-dir / EDITH_DATA_DIR. Drift here is invisible: the menu bar
+# would poll a dead path and render "not running" forever, indistinguishable from a stopped
+# daemon.
+#
+# Declared locally rather than imported from edithd ON PURPOSE. Importing the daemon module
+# for one filename pulls in keyring, kuzu, sqlite3, subprocess and threading — the menu bar
+# is a thin unix-socket client and must stay runnable without the daemon's dependency tree.
+# (An earlier revision did import it, and `python -m edith.menubar` died on ModuleNotFound:
+# keyring the moment it ran outside the fully-provisioned venv.)
+#
+# Drift is caught at TEST time instead, where importing edithd is free:
+# test_socket_basename_matches_the_daemons — asserts this equals edithd._SOCKET_NAME.
+_SOCKET_BASENAME = "edithd.sock"
 _DEFAULT_DATA_DIR = "~/.edith/data"
 _POLL_SECONDS = 3
 
@@ -35,7 +42,7 @@ _POLL_SECONDS = 3
 def default_socket_path() -> str:
     """The socket edithd listens on, honouring ``EDITH_DATA_DIR`` exactly as the daemon does."""
     data_dir = os.environ.get("EDITH_DATA_DIR", _DEFAULT_DATA_DIR)
-    return os.path.join(os.path.expanduser(data_dir), _SOCKET_NAME)
+    return os.path.join(os.path.expanduser(data_dir), _SOCKET_BASENAME)
 
 
 def _require_rumps():
