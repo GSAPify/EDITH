@@ -107,6 +107,19 @@ def test_no_credential_looking_value_in_the_tracked_template(
         )
 
 
+def test_no_credential_in_the_raw_plist_including_xml_comments() -> None:
+    """Scan the raw bytes, not just parsed values.
+
+    ``plistlib`` discards XML comments, and a comment is exactly where someone debugging a
+    launchd startup would paste a real key ("<!-- try BIFROST_API_KEY=sk-... -->"). The parsed
+    scan above cannot see it; this can.
+    """
+    for line in _PLIST_PATH.read_text().splitlines():
+        assert not _CREDENTIAL_PATTERN.search(line), (
+            f"raw plist line looks credential-shaped: {line!r}"
+        )
+
+
 def test_wrapper_script_syntax_is_valid() -> None:
     result = subprocess.run(
         ["bash", "-n", str(_WRAPPER_PATH)],
@@ -117,10 +130,47 @@ def test_wrapper_script_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_wrapper_script_sources_env_and_execs_daemon() -> None:
-    text = _WRAPPER_PATH.read_text()
-    assert "source" in text and ".env" in text
-    assert "exec" in text and "edith.daemon" in text
+def test_wrapper_actually_sources_env_into_the_daemons_environment(
+    tmp_path: Path,
+) -> None:
+    """RUN the wrapper against a stub repo and prove the .env reached the exec'd process.
+
+    Sourcing ``.env`` is the wrapper's entire reason to exist — launchd inherits no shell
+    environment, so if this block is ever dropped the daemon boots with no ``BIFROST_*`` and
+    (per ``daemon/__main__.py``) only *warns* before continuing: EDITH comes up, the menu bar
+    reads "running", and every reply silently fails.
+
+    A substring check over the file text cannot catch that — the header comment alone contains
+    "source", ".env" and "exec". This runs the real script instead: it self-locates its repo
+    from ``BASH_SOURCE``, so a stub tree with a fake ``.venv/bin/python`` that echoes the var
+    proves the value was exported. Delete the sourcing block and this dies.
+    """
+    repo = tmp_path / "repo"
+    (repo / "deploy").mkdir(parents=True)
+    (repo / ".venv" / "bin").mkdir(parents=True)
+    (repo / ".env").write_text("EDITH_TEST_TOKEN=surfaced-from-dotenv\n")
+
+    stub_python = repo / ".venv" / "bin" / "python"
+    stub_python.write_text('#!/bin/bash\necho "TOKEN=${EDITH_TEST_TOKEN:-MISSING}"\n')
+    stub_python.chmod(0o755)
+
+    wrapper = repo / "deploy" / "edithd-launcher.sh"
+    wrapper.write_text(_WRAPPER_PATH.read_text())
+    wrapper.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(wrapper)], capture_output=True, text=True, check=False, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "TOKEN=surfaced-from-dotenv" in result.stdout, (
+        f"the wrapper did not export .env into the exec'd process: {result.stdout!r}"
+    )
+
+
+def test_wrapper_execs_the_daemon_module() -> None:
+    """The exec target is the daemon — a wrapper that sources .env and runs nothing is useless."""
+    assert "-m edith.daemon" in _WRAPPER_PATH.read_text()
 
 
 def test_wrapper_script_contains_no_credential_looking_value() -> None:
