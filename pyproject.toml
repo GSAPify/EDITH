@@ -25,6 +25,9 @@ voice = [
     "sounddevice",
     "numpy",
 ]
+menubar = [
+    "rumps",
+]
 
 [dependency-groups]
 dev = [
