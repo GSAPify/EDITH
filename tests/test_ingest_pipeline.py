@@ -295,3 +295,54 @@ async def test_backfill_embeds_graph_only_facts_idempotently(
         assert store.backfill_embeddings() == 0
     finally:
         store.close()
+
+
+class OneBadRepoRouter(FakeRouter):
+    """Raises for exactly one repo, mirroring a gateway 400 on a single payload."""
+
+    def __init__(self, poison: str) -> None:
+        super().__init__()
+        self._poison = poison
+
+    async def model_call(
+        self,
+        messages: list[dict[str, object]],
+        tier_hint: Tier,
+        max_tokens: int = 1024,
+    ) -> ModelResponse:
+        blob = "".join(str(m.get("content", "")) for m in messages)
+        if self._poison in blob:
+            raise RuntimeError("400 Bad Request")
+        return await super().model_call(messages, tier_hint, max_tokens)
+
+
+async def test_one_failing_repo_does_not_discard_the_others(
+    tmp_path: Path, embedder: Embedder
+) -> None:
+    """A single repo's transport error must not throw away the whole run.
+
+    This is what a real 400 did: asyncio.gather without return_exceptions=True propagated
+    out, cancelled every sibling, and skipped the _record loop entirely — so 1294 repos of
+    paid-for model calls produced ZERO graph writes and the traceback never named the repo.
+    """
+    root = tmp_path / "clones"
+    root.mkdir()
+    for name in ("alpha", "poison-repo", "omega"):
+        _make_clone(root, name)
+
+    report = await run_ingest(
+        scan_root=root,
+        router=OneBadRepoRouter("poison-repo"),
+        data_dir=tmp_path / "data",
+        embedder=embedder,
+        gh_metadata=lambda _name: {},
+        include_global=False,
+    )
+
+    # The good repos still landed.
+    assert report.repos_ingested == 2, report.render()
+    # The bad one is counted AND named — a bare count would be undiagnosable.
+    assert report.repos_failed == 1
+    assert [n for n, _ in report.failures] == ["poison-repo"]
+    assert "400 Bad Request" in report.failures[0][1]
+    assert "poison-repo" in report.render()

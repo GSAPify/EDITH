@@ -55,9 +55,11 @@ class IngestReport:
     dry_run: bool = False
     repos_ingested: int = 0
     repos_skipped: int = 0
+    repos_failed: int = 0
     facts_written: int = 0
     data_dir: str = ""
     summaries: list[RepoSummary] = field(default_factory=list)
+    failures: list[tuple[str, str]] = field(default_factory=list)  # (repo name, error)
 
     def render(self) -> str:
         """Human-readable report. Run through the secrets filter as a last line
@@ -68,6 +70,7 @@ class IngestReport:
             f"  data dir:        {self.data_dir}",
             f"  repos ingested:  {self.repos_ingested}",
             f"  repos skipped:   {self.repos_skipped}",
+            f"  repos FAILED:    {self.repos_failed}",
             f"  facts written:   {self.facts_written}",
             "  per-repo:",
         ]
@@ -78,6 +81,11 @@ class IngestReport:
                 f"    - {s.name}: {s.status}, {s.facts} facts, "
                 f"relevance={s.relevance:.2f} ({tier}){note}"
             )
+        if self.failures:
+            # Name the failures. A count alone is undiagnosable: the run that motivated this
+            # died on ONE repo and the traceback never said which.
+            lines.append("  failures:")
+            lines.extend(f"    - {name}: {err}" for name, err in self.failures)
         return sanitize_text("\n".join(lines))
 
 
@@ -131,6 +139,11 @@ async def run_ingest(
 
     try:
         semaphore = asyncio.Semaphore(max(1, concurrency))
+        # return_exceptions=True is load-bearing, not defensive. Without it one repo's
+        # transport error propagates out of gather, cancels every sibling, and skips the
+        # _record loop below — so a single failure discards the WHOLE run's graph writes
+        # while every model call already made is still paid for. Observed for real: one 400
+        # from the gateway threw away 1294 repos of work and produced zero writes.
         results = await asyncio.gather(
             *(
                 _process_repo(
@@ -138,10 +151,17 @@ async def run_ingest(
                     deep_max_tokens,
                 )
                 for repo in targets
-            )
+            ),
+            return_exceptions=True,
         )
-        for repo, summary, nodes, edges, extraction in results:
-            _record(report, store, dry_run, repo, summary, nodes, edges, extraction)
+        for repo, outcome in zip(targets, results, strict=True):
+            if isinstance(outcome, BaseException):
+                if isinstance(outcome, asyncio.CancelledError):
+                    raise outcome
+                report.repos_failed += 1
+                report.failures.append((repo.name, f"{type(outcome).__name__}: {outcome}"))
+                continue
+            _record(report, store, dry_run, *outcome)
         if include_global:
             _ingest_global_claude_md(report, store, dry_run)
     finally:
