@@ -108,3 +108,81 @@ exact-membership (no substring), non-empty default denylist; budget accumulation
 `budget_used`, `budget_check` flipping false past the cap, the discriminating
 **OPUS-cut-off-before-Sonnet-at-the-same-usage** case, and window rollover (reset on a
 pure read, no-roll-before-elapsed, fresh window after roll) via an injected clock.
+
+## Completion Record — 11 guard (wiring) — 2026-07-27
+
+Guard shipped in PR #17 and was constructed by **nobody** — every gate defaulted to
+permissive and nothing ever called `record()`. This lands the wiring.
+
+- **One Guard per daemon.** `edith/daemon/__main__.py` builds it **before** `_build_router`
+  so the sharing is structural, then hands the same instance to the `Router` and to
+  `EdithDaemon(guard=…)`. A per-subsystem Guard would give each its own window, which is not
+  a budget. `EdithDaemon`'s `budget: BudgetView` parameter and the `_ZeroBudget` stub are
+  **deleted** (zero callers) — one parameter, one meaning.
+- **The charge path (the crux).** `Router` gained an `on_usage: Callable[[int, int], None]`
+  seam mirroring the existing `budget_check` / `redactor` style, wired to `Guard.record`.
+  It fires in `model_call` (after parse) and in `model_call_stream` (just before the final
+  chunk). `model_call_masked` needs **no third call site** — it delegates to those two, so
+  both of its billing events are charged automatically; a comment says so, to stop a future
+  "fix" from double-billing.
+- **Streaming usage is real, not a hole.** Anthropic SSE reports usage across `message_start`
+  (`input_tokens`) and `message_delta` (`output_tokens`), which `_usage_of` already
+  accumulated — the repo's own stream fixture emits both. A field the gateway omits reads as
+  0 rather than being guessed at (test: `..._when_the_gateway_omits_usage`). The one uncharged
+  path is a caller that abandons the generator mid-stream; `model_call_masked`'s pump always
+  drains, so nothing in-tree hits it.
+- **Four seams wired.** `Router.budget_check` and `BackgroundReasoner(budget_check=…)` take
+  `Guard.budget_check` directly (signatures already matched). `Narrator.budget_gate` is
+  zero-arg, so it is bound to `Tier.HAIKU` — the tier `_narrate_error` actually calls at.
+  `Guard` satisfies `control.BudgetView` structurally, so `status.budget_used` is now real
+  spend (this is the number PR #25's menu-bar label renders).
+- **Desktop autonomy gate — a NEW call site.** `DesktopControlSkill` took a `guard` seam and
+  puts the parsed action's verb (`Intent.value`: `open_app` / `spotify` / `terminal` /
+  `omc_launch`) to `authorize` **before any `Runner` call**, so a refused action has no OS
+  side effect. `handled=True` on refusal — refusing IS handling the turn; falling through
+  would have Brain answer an utterance she just declined to act on. None of the four verbs
+  are in the default denylist, so stock behaviour is unchanged.
+- **ASK is mapped to DENY, fail-closed.** There is no voice-confirm implementation anywhere
+  in the repo: `PRReviewSkill`'s injected `Confirm` callable defaults to `_deny` and the
+  daemon wires that default. So ASK cannot be honoured and must not be assumed — EDITH
+  refuses and *says why* rather than half-acting or going quiet. **A real voice-confirm
+  ("should I?" → listen for yes) is its own item**; it is the sole reason ASK collapses here.
+  When the gate is reached the haiku classify fallback has already fired for an
+  otherwise-unparsed utterance — one cheap model call for an action then refused. Accepted:
+  the gate needs a parsed verb, and the denylist win is worth it.
+
+### Budget-exhausted behaviour, per seam
+
+| Seam | At exhaustion | User-visible |
+|---|---|---|
+| `Router.budget_check` | only ever consulted with `Tier.OPUS` (in `_resolve`), so an opus hint falls back to Sonnet with `budget_limited=True` | live answer unaffected |
+| `BackgroundReasoner` | job is `DENIED` and never starts | Brain speaks `_THINKING_DENIED` instead of the ack |
+| `Narrator.budget_gate` (HAIKU) | model-gated branch skipped → SPOKEN-LOCAL template | she still speaks, just no model call |
+| `BudgetView` | n/a — a read | menu bar shows real usage instead of 0 |
+
+**Load-bearing property:** because the Router only ever gates `Tier.OPUS`, a fully exhausted
+budget can never block a live Sonnet/Haiku call at the Router layer. **EDITH cannot go mute
+from budget exhaustion.** Everything degrades around the live voice, which is exactly what
+Guard's `_OPUS_RESERVE_FRACTION` was designed to buy.
+
+**One behaviour fix this forced (`brain/loop.py`).** The explicit "think about X" path fired
+the background job and unconditionally spoke "I'll ping you when I have something", then
+returned. With a real budget a `DENIED` job never starts, so the owner would have been
+promised a ping that could never arrive — a silent drop, the exact failure mode to avoid.
+`_start_background` now returns the `BackgroundJob` and the caller speaks `_THINKING_DENIED`
+when it came back `DENIED`. The turn's shape is otherwise unchanged (it does not fall through
+to a live answer). The passive deep-input path needs no change: the live turn already answered.
+
+- **Tests:** **361 passed, 2 skipped** (348 baseline + 13 new in `tests/test_guard_wiring.py`),
+  `ruff check edith tests` clean. The new file proves the wiring, not the policy
+  (`test_guard.py` still owns policy): the charge path decrements a real Guard through all
+  three `model_call*` variants; OPUS is cut while SONNET passes at the reserve boundary,
+  observed through the Router's chosen model id; a denylisted desktop action never reaches
+  the Runner; ASK→DENY never reaches the Runner; the daemon shares one Guard across reasoner
+  / desktop skill / Control API; and both exhaustion-is-audible paths.
+- **Deliberately NOT done:** `edith/voice/__main__.py` builds its own Router for the
+  voice-only demo entry point and keeps the permissive defaults — it is a separate process,
+  not the daemon, and giving it a Guard would be a second window with no Control API to read
+  it. Guard itself is untouched and stays pure — no I/O, no bus, no model calls.
+- **Owner LIVE-SMOKE still pending:** a real spoken denylisted action being refused aloud,
+  and watching `budget_used` climb in the menu bar over a live session.

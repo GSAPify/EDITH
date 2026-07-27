@@ -62,8 +62,11 @@ class Narrator:
     ) -> None:
         self._speak = speak
         self._router = router
-        # Budget seam: Guard (a later slice) owns the real per-window budget. Until
-        # then this defaults to always-allow; edithd can inject a real gate.
+        # Budget seam: zero-arg by design. edithd binds it to the daemon Guard at the
+        # tier this class actually calls (HAIKU, in _narrate_error). When it returns
+        # False the model-gated branch is skipped and _narrate_error falls to its
+        # SPOKEN-LOCAL template — narration degrades, it never goes silent. Default
+        # always-allow so a standalone Narrator is unchanged.
         self._budget_gate = budget_gate
         self._clock = clock
         self._idle_seconds = idle_seconds

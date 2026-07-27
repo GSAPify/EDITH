@@ -16,8 +16,9 @@ Slice 5 adds, over the single-tier passthrough: **tier selection** (``resolve_ti
 (``model_call_masked`` — fast ack + slower answer, two separate overlapped calls), a
 **budget gate** seam before opus, and the **redaction choke-point**: ``sanitize_text`` runs on
 every outbound message inside every ``model_call*`` so a secret can never reach the gateway
-regardless of caller. (Guard owns the real redact/budget contracts; those slices are deferred,
-so Router injects seams that default to the safe/allow behaviour.)
+regardless of caller. Guard owns the budget contract and edithd injects it into two seams
+here (spec 11): ``budget_check`` gates the tier before a call, ``on_usage`` charges the
+window after one. Both default to allow/no-op so a Router built without a Guard is unchanged.
 
 The non-streaming ``model_call`` POST path is unchanged from slices 1–4 (callers depend on it);
 streaming is added alongside, not retrofitted onto it.
@@ -44,9 +45,12 @@ _DEFAULT_MAX_TOKENS = 1024
 # not a bare except. httpx.HTTPError covers TransportError + HTTPStatusError.
 MODEL_CALL_ERRORS: tuple[type[Exception], ...] = (TimeoutError, httpx.HTTPError)
 
-# Seams for the deferred Guard slice (north-star §6.1/§6.2).
+# Guard seams (north-star §6.1/§6.2). ``budget_check`` gates a tier BEFORE the call;
+# ``on_usage`` charges the window AFTER it. Both default to the no-op/allow behaviour so
+# a Router built without a Guard behaves exactly as it did before.
 Redactor = Callable[[str], str]
 BudgetCheck = Callable[[Tier], bool]  # True == this tier is within budget
+Usage = Callable[[int, int], None]  # (tokens_in, tokens_out) -> charged to the budget
 
 
 class ModelResponse:
@@ -95,13 +99,17 @@ class Router:
         *,
         budget_check: BudgetCheck = lambda _tier: True,
         redactor: Redactor = sanitize_text,
+        on_usage: Usage = lambda _tokens_in, _tokens_out: None,
     ) -> None:
         self._client = client
         self._api_key = api_key
         self._models = models
-        # Guard seams (deferred slice): default allow + the real sanitize_text choke-point.
+        # Guard seams: default allow + the real sanitize_text choke-point + a no-op
+        # meter. edithd injects ``guard.budget_check`` / ``guard.record`` here, which is
+        # what makes the daemon's token budget actually decrement.
         self._budget_check = budget_check
         self._redact = redactor
+        self._on_usage = on_usage
 
     async def model_call(
         self,
@@ -117,6 +125,7 @@ class Router:
         data = await self._post_messages(self._models[decision.tier], safe, max_tokens)
         response = _parse_response(data)
         response.budget_limited = decision.budget_limited
+        self._on_usage(response.input_tokens, response.output_tokens)
         return response
 
     async def model_call_stream(
@@ -130,6 +139,10 @@ class Router:
         """Streaming call: yields text ``ModelChunk``s, then a final chunk with usage.
 
         VoiceIO can begin TTS on the first token instead of waiting for completion.
+
+        Usage IS chargeable here: Anthropic SSE reports it across ``message_start``
+        (``input_tokens``) and ``message_delta`` (``output_tokens``), which ``_usage_of``
+        accumulates — so ``on_usage`` fires once, just before the final chunk.
         """
         safe = self._redact_messages(messages)
         decision = self._resolve(tier_hint, safe, task_type)
@@ -154,6 +167,10 @@ class Router:
                 text = _delta_text(event)
                 if text:
                     yield ModelChunk(token=text, is_final=False)
+        # Charge the stream. A field the gateway omits reads as 0 rather than being
+        # guessed at. A caller that abandons the generator mid-stream never reaches
+        # here and is therefore not charged (``model_call_masked``'s pump always drains).
+        self._on_usage(_int_of(usage, "input_tokens"), _int_of(usage, "output_tokens"))
         yield ModelChunk(token="", is_final=True, usage=usage)
 
     async def model_call_masked(
@@ -169,7 +186,10 @@ class Router:
 
         Returns ``(ack_stream, answer_task)`` — two SEPARATE calls (two billing events),
         started concurrently so TTS can speak the ack while the real answer is still in
-        flight. Answer defaults to **Sonnet**: the live turn is never blocked on opus
+        flight. BOTH calls are charged to ``on_usage`` — not here, but inside the two
+        delegates (``model_call`` and ``model_call_stream``); do not add a third charge
+        site here or the masked path double-bills. Answer defaults to **Sonnet**: the
+        live turn is never blocked on opus
         (spec §Tier selection, latency-first). Opus deep work is background (``think_async``,
         deferred). Brain decides when to invoke this; Router provides the mechanism.
         """
@@ -258,6 +278,12 @@ def _parse_response(data: dict[str, object]) -> ModelResponse:
     input_tokens = int(usage.get("input_tokens", 0)) if isinstance(usage, dict) else 0
     output_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
     return ModelResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def _int_of(usage: dict[str, object], key: str) -> int:
+    """Read an int token count out of an SSE usage dict; 0 when absent or non-numeric."""
+    value = usage.get(key)
+    return int(value) if isinstance(value, (int, float)) else 0
 
 
 def _parse_sse_data(payload: str) -> dict[str, object] | None:
