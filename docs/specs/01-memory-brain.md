@@ -795,7 +795,12 @@ live smoke via `--run-live` → **1 passed** (real Bifrost 200, non-empty text, 
   defensive `compact()` if present, close store, remove socket); **pause wired into Brain**.
 - `securestore.py` — `SecureStore` Protocol + `LocalSecureStore` (0700 dir, explicit `chmod`);
   encrypted-APFS mount is an honest `TODO(encrypted-volume)` seam (no fake mount, holds no key).
-- `deploy/com.gsapify.edithd.plist` — launchd template (RunAtLoad/KeepAlive); **NOT auto-loaded**.
+- ~~`deploy/com.gsapify.edithd.plist` — launchd template (RunAtLoad/KeepAlive); **NOT auto-loaded**.~~
+  **Correction:** this did NOT ship in this slice — no `deploy/` directory existed yet
+  (`git log --all --diff-filter=A -- "*.plist"` was empty until this was corrected). The launchd
+  template, its env wrapper, and the install runbook shipped later as EDITH operationalization
+  item 1 (`deploy/com.gsapify.edithd.plist`, `deploy/edithd-launcher.sh`, `deploy/README.md`) —
+  see that item's Completion Record below.
 - **Brain pause wiring** (`brain/loop.py`) — `is_paused` predicate; paused ⇒ skips model_call AND
   remember (privacy-respecting per §"Pause + Memory"); RAM buffer retained.
 
@@ -811,3 +816,45 @@ commits with no rework.
 **Still deferred (their own slices, not blockers):** `compact()` (Session/Conversation tables +
 working-context buffer), Guard (authorize/budget), encrypted-volume mount, VoiceIO/SessionBus
 event production. **Next: Slice 2 — PR-review skill.**
+
+## Completion Record — launchd LaunchAgent (operationalization item 1) — 2026-07-27
+
+Closes the gap the correction above documents: Slice 1 claimed a launchd template shipped; none
+ever existed. It does now.
+
+- **Built:** `deploy/com.gsapify.edithd.plist` (template — `RunAtLoad` + `KeepAlive` +
+  `ThrottleInterval 10` crash-loop guard, log paths under `~/.edith/logs/`, two `__PLACEHOLDER__`
+  paths since launchd expands neither `~` nor relative paths, and **no `EnvironmentVariables`
+  key** so no credential can live in it); `deploy/edithd-launcher.sh` (self-locates the repo,
+  sources the untracked `.env`, `exec`s the daemon); `deploy/README.md` (install / bootout /
+  status / logs runbook).
+- **Tests:** 11 new (`tests/test_deploy_launchagent.py`), **359 passed, 2 skipped**, ruff clean.
+  The load-bearing ones are not restatements of the file: `plistlib` must parse it, `Label` must
+  match the filename, there must be **no** `EnvironmentVariables` key, no credential-shaped value
+  may appear in either tracked file, and the wrapper must survive `bash -n`.
+
+### The lock findings — the reason this item gated the refresh job
+
+Verified by reading `edithd.py`, `store.py`, `control.py`, `state.py` (not from STATE.md's summary):
+
+- **`pause` does NOT release the Kuzu handle.** `RuntimeState.pause()` (`state.py:48-51`) flips an
+  enum and never touches `self._memory`; `is_paused` only makes Brain skip a turn. It is a
+  behaviour switch, not a resource-release one.
+- The handle is released **only** by `MemoryStore.close()` (`store.py:391-394`), called **only**
+  from `EdithDaemon.stop()` (`edithd.py:361-402`), reached **only** via a Control API `kill` or
+  `Ctrl-C`.
+- With `KeepAlive` unconditional, a `kill` is immediately followed by a launchd respawn that
+  re-takes the lock — so `kill` leaves no usable window. **`launchctl bootout` is the only way to
+  free the graph** for `edith.viewer` / `edith.finder` / `edith.ingest`.
+- **Known defect, filed not fixed:** `edithd` installs no `SIGTERM`/`SIGINT` handler
+  (`grep -rn "add_signal_handler\|signal\." edith/` is empty), so `bootout` is an *ungraceful*
+  stop — `compact()` and `close()` do not run. A `KeepAlive` policy distinguishing intentional
+  stop from crash, plus a signal handler, is its own item.
+
+**Consequence for operationalization item 4:** because `pause` cannot free the lock and `bootout`
+is ungraceful, "stop the daemon around a scheduled ingest" is a poor design. Measured separately:
+a full workspace pass is ~14 paginated API calls and **~54 ms/repo → ~1.3 min for 1378 repos**
+holding the write lock. That argues for the daemon scheduling the refresh **in-process**.
+
+- **Owner LIVE-SMOKE still pending:** `launchctl bootstrap` and real always-on behaviour cannot be
+  exercised headlessly. Nothing here proves the daemon launches correctly under real launchd.
