@@ -157,3 +157,103 @@ upsert idempotently.
   nodes to a temp dir with a clean secret-scan.
 - **Follow-ups / known gaps:** existing-DB migration (open question 1); Fact granularity;
   Skill wrapper for bus-triggered ingestion.
+
+---
+
+## Completion Record — 08 repo-ingest — weekly graph refresh, item 4 (2026-07-27)
+
+- **What shipped:** the daemon now schedules its own weekly graph refresh in-process
+  (`EdithDaemon`, `edith/daemon/edithd.py`), behind `enable_graph_refresh=False` (default off,
+  so every existing test and the plain daemon are unaffected). Two pieces:
+  1. An **injected-store seam** on `ingest_workspace` (`edith/ingest/workspace.py`): a new
+     `store: MemoryStore | None = None` kwarg. When given, `ingest_workspace` writes through
+     THAT handle and never closes it; when absent, behaviour is byte-for-byte unchanged (builds
+     and closes its own `VectorMemoryStore`, exactly as before). This is what lets the daemon's
+     refresh reuse Brain's own Memory handle instead of opening a second Kuzu connection
+     in-process — the central constraint from the roadmap ("Kuzu embedded is single-process").
+  2. **`tenacity` retry on `_gh_list_repos`** — mirrors the Router's `_post_messages` policy
+     exactly (`stop_after_attempt(3)`, `wait_exponential(multiplier=0.2, max=2.0)`,
+     `reraise=True`), retrying only `subprocess.CalledProcessError`. This is for flakiness, NOT
+     rate limits — the pass is ~13 paginated calls for patterninc / 1 for ampmedia, nowhere
+     near the 5000/hr ceiling (confirmed in the roadmap's evidence).
+- **The scheduled job itself:** an `asyncio.Task` started in `EdithDaemon.start()`, cancelled in
+  `stop()`. Runs the model-free passes only — `ingest_workspace("patterninc")`,
+  `ingest_workspace("ampmedia")`, then `backfill_embeddings()` — through the SAME Memory handle
+  Brain uses. **Deep extraction (Opus per repo, ~2600 calls) is explicitly OUT OF SCOPE.**
+  Interval and the refresh callable are both constructor-injectable
+  (`graph_refresh_interval_seconds`, `graph_refresh_fn`) so tests never wait a real week or
+  touch the network/`gh`.
+- **Refresh-first, not sleep-first.** The loop runs immediately on `start()` (when not paused),
+  then sleeps the interval, forever — deliberately NOT sleep-then-refresh. Reasoning: under
+  launchd `KeepAlive` (PR #24, shipping alongside this) the daemon can restart far more often
+  than weekly, and a sleep-first loop resets its wait on every restart, which could mean the
+  graph plausibly never refreshes again — the exact failure this item exists to fix (nothing
+  has refreshed the graph since 2026-07-12). Every write is an idempotent MERGE-upsert
+  (`MemoryStore._upsert_node`), so re-running on a fast restart loop is wasted local time, not a
+  correctness problem. A persisted last-refresh timestamp to avoid that waste is a separate,
+  out-of-scope PR (see below).
+- **The concurrency question, answered directly.** The daemon's own Memory handle is used by
+  Brain from the event-loop thread, while the refresh writes from a worker thread
+  (`asyncio.to_thread`, so the ~1.3-min write pass never blocks the loop). Kuzu's `Connection`
+  is not documented safe for concurrent multi-thread access, so these two paths must never run
+  at the same time against the same handle. **Chosen fix: skip the turn, not a cross-thread
+  lock.** A `_graph_refresh_in_progress` flag is folded into the SAME `is_paused` predicate
+  already wired into Brain (`self.state.is_paused or self.state.is_stopping or
+  self._graph_refresh_in_progress`) — sets/clears only ever happen on the single event-loop
+  thread (cooperative asyncio), so the flag itself is race-free, and while it's True Brain skips
+  its whole pass (no recall, no model call, no remember — no reply at all, not even an apology).
+  This was chosen over a `threading.Lock` spanning both the coroutine and the worker thread
+  because: it reuses an existing, already-tested seam instead of a new primitive; it has the
+  same worst-case latency cost as a lock would (a turn can wait out the ~1.3-min window either
+  way); and it avoids a lock class of bugs (deadlock ordering, holding a lock across an `await`)
+  for a once-a-week event. The honest cost: during that window the owner gets total silence,
+  same as a manual pause — stated here, not hidden. `self.state.last_event` is set to
+  `graph_refresh.started` / `.done` / `.failed` around the pass so Control API `status` at
+  least shows it ran.
+- **Shutdown correctness (found via review, fixed here, not deferred):** cancelling the
+  refresh's `asyncio.Task` does NOT stop an already-running worker thread — `asyncio.to_thread`
+  cannot interrupt work already executing in the thread pool, and this codebase's own voice-loop
+  comment already documents that fact. The first cut of this change cancelled and moved straight
+  to `compact()`/`close()`, which could close the Kuzu handle while the worker thread was still
+  mid-`remember()`. Fixed with a `threading.Event` (`_graph_refresh_thread_idle`) that is set
+  from INSIDE the worker thread's own `finally` (not the coroutine's), so it reflects true
+  completion regardless of task cancellation; `stop()` now does a bounded join
+  (`_GRAPH_REFRESH_SHUTDOWN_JOIN_TIMEOUT = 120s`, run via `asyncio.to_thread` so the wait itself
+  doesn't block the loop) on that event BEFORE `compact()`/`close()` run. Covered by
+  `test_stop_joins_an_in_flight_refresh_before_closing_memory`.
+- **One exception must not permanently kill the weekly loop.** The refresh runs inside a thread
+  wrapper that catches a declared, expected-failure tuple — `OSError` (e.g. `gh` missing),
+  `subprocess.SubprocessError` (a `CalledProcessError` that survives `_gh_list_repos`'s own
+  retries), `RuntimeError` (Kuzu query failures — verified empirically that `kuzu` raises plain
+  `RuntimeError`), `sqlite3.Error` (sqlite-vec write failures) — and continues to the next
+  scheduled cycle instead of letting the task die silently. Anything outside that declared set
+  is a real bug and is allowed to surface. Covered by `test_graph_refresh_error_does_not_kill_the_loop`.
+- **Known residual gap, stated rather than hidden:** the `is_paused` gate above only covers
+  Brain's live-turn pass. Two OTHER call sites also write the same Memory handle from the loop
+  thread without checking `is_paused` at all: `BackgroundReasoner`'s `on_done` callback
+  (`brain/loop.py`, fires whenever a background opus job lands, at an arbitrary later time) and
+  `finder/resolve.py`'s fire-and-forget `_deep_extract` (fired on a realtime resolve-on-miss).
+  Both could theoretically still race a refresh's worker thread. Gating them is a separate,
+  cross-cutting change (they're async-task callbacks, not a single call site) — flagged here for
+  a follow-up, not built in this PR.
+- **Explicitly out of scope (per the roadmap spec):** the `last_commit_date` incremental skip
+  (a runtime optimisation, its own PR); deep-extract scheduling (Opus per repo, ~2600 calls);
+  the missing SIGTERM handler; persisting a last-refresh timestamp (would avoid the
+  refresh-first re-run cost on a fast restart loop, but needs its own design); gating the two
+  residual writers noted above.
+- **Files changed:** `edith/ingest/workspace.py` (injected `store` seam + `tenacity` retry on
+  `_gh_list_repos`); `edith/daemon/edithd.py` (the scheduled refresh: constructor flags,
+  `_start_graph_refresh` / `_make_default_graph_refresh` / `_wrap_graph_refresh_for_thread` /
+  `_graph_refresh_loop`, the `is_paused` fold-in, `stop()`'s join); `tests/test_ingest_workspace.py`
+  (+4 tests); `tests/test_daemon_edithd.py` (+7 tests).
+- **Verification:** 359 tests green (348 baseline + 11 new), 0 failures; `ruff check edith
+  tests` clean; `pyright edith tests` — identical 31 pre-existing errors before and after (all
+  in files this PR did not touch: `voice/adapters.py`, `voice/live.py`, and typing noise in
+  several test files) — zero new errors introduced. The daemon tests exercise real
+  `threading.Event`-synchronized worker threads (not fixed sleeps) for the concurrency and
+  shutdown-join assertions, run 5x locally with no flakiness observed.
+- **What needs owner smoke (cannot be verified headlessly):** the REAL `ingest_workspace`
+  passes against the live `~/.edith/data/memory.kuzu` (this PR never opens that path — all
+  tests use `tmp_path`); whether a full weekly pass against 1378 real repos actually lands in
+  ~1.3 min as measured, with the daemon's live Brain answering turns normally before/after;
+  whether the owner notices/accepts the ~1.3-min silence window in practice.

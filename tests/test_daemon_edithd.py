@@ -19,8 +19,10 @@ Asserted:
 
 from __future__ import annotations
 
+import asyncio
 import stat
 import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -332,3 +334,209 @@ def test_resolve_secrets_prefers_keyring(monkeypatch):
     secrets = resolve_secrets()
 
     assert secrets.bifrost_api_key == "keychain-key"
+
+
+# --- weekly graph refresh (spec 08 item 4) ---------------------------------------------------
+#
+# The real refresh (ingest_workspace + backfill_embeddings) needs network/`gh` and a real
+# Kuzu handle, so these tests inject the interval AND the refresh callable — no real clock
+# wait, no network, and never the owner's real ~/.edith/data/memory.kuzu.
+
+async def _wait_until(predicate, timeout: float = 2.0) -> None:  # noqa: ANN001
+    """Poll ``predicate`` until true (or raise) — avoids a fixed guessed sleep."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("timed out waiting for condition")
+        await asyncio.sleep(0.005)
+
+
+async def test_graph_refresh_off_by_default(data_dir):
+    # No enable_graph_refresh kwarg at all -> existing daemons/tests are unaffected.
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+    await daemon.start()
+    try:
+        assert daemon._graph_refresh_task is None
+    finally:
+        await daemon.stop()
+
+
+async def test_graph_refresh_runs_the_injected_callable_on_interval(data_dir):
+    calls = {"n": 0}
+
+    def fake_refresh() -> None:
+        calls["n"] += 1
+
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=SpyMemory(),
+        router=FakeRouter(),
+        enable_graph_refresh=True,
+        graph_refresh_interval_seconds=0.01,
+        graph_refresh_fn=fake_refresh,
+    )
+    await daemon.start()
+    try:
+        assert daemon._graph_refresh_task is not None
+        await _wait_until(lambda: calls["n"] >= 1)
+    finally:
+        await daemon.stop()
+
+
+async def test_graph_refresh_skips_a_cycle_while_paused(data_dir):
+    calls = {"n": 0}
+
+    def fake_refresh() -> None:
+        calls["n"] += 1
+
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=SpyMemory(),
+        router=FakeRouter(),
+        enable_graph_refresh=True,
+        graph_refresh_interval_seconds=0.01,
+        graph_refresh_fn=fake_refresh,
+    )
+    daemon.state.pause()
+    await daemon.start()
+    try:
+        await asyncio.sleep(0.05)  # several intervals elapse while paused
+        assert calls["n"] == 0  # respected pause: never started a refresh
+
+        daemon.state.resume()
+        await _wait_until(lambda: calls["n"] >= 1)
+    finally:
+        await daemon.stop()
+
+
+async def test_graph_refresh_in_progress_makes_brain_skip_a_turn(data_dir):
+    """The concurrency answer (spec 08 item 4): while the refresh writes Memory from a
+    worker thread, Brain must not run recall/remember on the loop thread against the SAME
+    handle. Proven by a refresh_fn that blocks until released, mid-refresh."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_refresh() -> None:
+        started.set()
+        release.wait(timeout=5)
+
+    router = FakeRouter()
+    memory = SpyMemory()
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=memory,
+        router=router,
+        enable_graph_refresh=True,
+        graph_refresh_interval_seconds=0.01,
+        graph_refresh_fn=blocking_refresh,
+    )
+    await daemon.start()
+    try:
+        await _wait_until(lambda: started.is_set())
+        assert daemon._graph_refresh_in_progress is True
+
+        await daemon.bus.publish(
+            "voice.utterance", source="voice", payload={"text": "hi during refresh"}
+        )
+        assert router.calls == []              # Brain skipped the turn — refresh was in flight
+        assert memory.remembered_nodes == []    # the invariant that actually matters: no write
+
+        release.set()  # let the refresh finish
+        await _wait_until(lambda: daemon._graph_refresh_in_progress is False)
+
+        await daemon.bus.publish(
+            "voice.utterance", source="voice", payload={"text": "hi after refresh"}
+        )
+        assert len(router.calls) == 1  # back to normal once the refresh clears
+    finally:
+        release.set()
+        await daemon.stop()
+
+
+async def test_graph_refresh_error_does_not_kill_the_loop(data_dir):
+    """A declared, expected failure (e.g. `gh` missing / a Kuzu write error) must not
+    permanently end the weekly loop — the next scheduled cycle still runs (spec 08 item 4)."""
+    calls = {"n": 0}
+
+    def flaky_refresh() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated transient failure")
+
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=SpyMemory(),
+        router=FakeRouter(),
+        enable_graph_refresh=True,
+        graph_refresh_interval_seconds=0.01,
+        graph_refresh_fn=flaky_refresh,
+    )
+    await daemon.start()
+    try:
+        await _wait_until(lambda: calls["n"] >= 2)   # survives the first failure
+        assert daemon._graph_refresh_task is not None
+        assert not daemon._graph_refresh_task.done()  # the loop task is still alive
+    finally:
+        await daemon.stop()
+
+
+async def test_stop_joins_an_in_flight_refresh_before_closing_memory(data_dir):
+    """The shutdown correctness fix (spec 08 item 4): stop() must not close Memory while the
+    refresh's worker thread is still writing to it. Cancelling the task alone does not stop
+    that thread, so stop() waits on the thread's own completion signal first."""
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    def blocking_refresh() -> None:
+        started.set()
+        release.wait(timeout=5)
+        order.append("refresh_finished")
+
+    memory = SpyMemory()
+    memory.close = lambda: order.append("memory_closed")  # type: ignore[method-assign]
+
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=memory,
+        router=FakeRouter(),
+        enable_graph_refresh=True,
+        graph_refresh_interval_seconds=0.01,
+        graph_refresh_fn=blocking_refresh,
+    )
+    await daemon.start()
+    await _wait_until(lambda: started.is_set())
+
+    async def _delayed_release() -> None:
+        await asyncio.sleep(0.05)
+        release.set()
+
+    asyncio.get_running_loop().create_task(_delayed_release())
+    await daemon.stop()  # must block until the worker thread actually finishes
+
+    assert order == ["refresh_finished", "memory_closed"]  # never reordered
+
+
+async def test_stop_cancels_the_graph_refresh_task(data_dir):
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=SpyMemory(),
+        router=FakeRouter(),
+        enable_graph_refresh=True,
+        graph_refresh_interval_seconds=999.0,  # never fires within the test
+        graph_refresh_fn=lambda: None,
+    )
+    await daemon.start()
+    task = daemon._graph_refresh_task
+    assert task is not None
+    await daemon.stop()
+    await _wait_until(lambda: task.cancelled())  # cancellation is processed asynchronously
+
+    assert daemon._graph_refresh_task is None

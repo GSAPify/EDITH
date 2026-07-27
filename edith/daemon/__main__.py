@@ -53,7 +53,7 @@ def _build_router(client: httpx.AsyncClient, api_key: str, guard: Guard) -> Rout
     )
 
 
-async def _amain(engine: str, data_dir: str) -> int:
+async def _amain(engine: str, data_dir: str, graph_refresh: bool = False) -> int:
     secrets = resolve_secrets()
     if not secrets.bifrost_base_url or not secrets.bifrost_api_key:
         print("[edithd] no Bifrost creds (BIFROST_BASE_URL / BIFROST_API_KEY) — "
@@ -89,6 +89,7 @@ async def _amain(engine: str, data_dir: str) -> int:
         voice=voice,
         enable_voice=True,
         enable_session_awareness=True,
+        enable_graph_refresh=graph_refresh,
     )
     await daemon.start()
     print(f"[edithd] running (data={expanded}, engine={engine}). Say 'Hey Edith, …'  "
@@ -108,9 +109,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="edith.daemon", description="EDITH daemon")
     parser.add_argument("--engine", default="piper", choices=["piper", "elevenlabs"])
     parser.add_argument("--data-dir", default=_DEFAULT_DATA_DIR)
+    parser.add_argument(
+        "--graph-refresh",
+        action="store_true",
+        help=(
+            "run the weekly model-free graph refresh in-process (both orgs' metadata pass + a "
+            "local reembed). OFF by default. Refreshes on start, then every 7 days of uptime — "
+            "there is no persisted last-run timestamp, so a daemon that restarts often re-runs "
+            "the ~1.3-min pass each time (idempotent MERGE-upserts, so wasted work not "
+            "corruption). Never deep-extracts."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        return asyncio.run(_amain(args.engine, args.data_dir))
+        return asyncio.run(_amain(args.engine, args.data_dir, args.graph_refresh))
     except KeyboardInterrupt:
         return 0
 
