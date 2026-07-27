@@ -35,3 +35,6 @@ logs/
 
 # OMC runtime session state (never commit)
 .omc/
+
+# Agent worktrees (Claude Code isolation) — never commit these
+.claude/worktrees/
