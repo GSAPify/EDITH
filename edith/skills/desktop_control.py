@@ -6,9 +6,17 @@ starting claude/OMC in it). Parsing + resolution are model-free; a single haiku 
 fires only when the regex fast-path misses AND a Router is wired.
 
 Every action in v1 is AUTO (spec 06 §Autonomy — open / play / cd / launch), so
-``needs_confirmation`` is ``False`` and there is no ASK/DENY branch: the parser simply
-never emits an action outside the AUTO set. Repo ambiguity is the one place the Skill
+``needs_confirmation`` is ``False``. Repo ambiguity is the one place the Skill
 STOPS and asks (``SkillResult.asked``) rather than guessing.
+
+**Autonomy gate (spec 11).** A ``guard`` may be injected; when it is, the parsed action's
+verb (``Intent.value`` — ``open_app`` / ``spotify`` / ``terminal`` / ``omc_launch``) is put
+to ``Guard.authorize`` BEFORE any ``Runner`` call, so a denylisted OS action is refused
+instead of executed. **ASK is mapped to DENY, fail-closed**: there is no voice-confirm
+implementation in the repo (``PRReviewSkill``'s ``Confirm`` seam defaults to deny and the
+daemon wires that default), so an action that needs confirmation cannot be confirmed and
+must not be assumed. Either way EDITH *says* why she refused rather than going quiet. When
+no guard is injected the gate is absent and behaviour is exactly as before.
 
 All OS access goes through the injected ``Runner`` seam and ``RepoResolver``, so the whole
 flow is headless in tests. The real "Spotify opens / OMC starts" behaviour is owner
@@ -37,10 +45,18 @@ from edith.desktop.executors import (
     open_terminal,
     spotify_command,
 )
+from edith.guard import Decision
 from edith.router import ModelResponse, Tier
 from edith.skills.base import SkillContext, SkillResult
 
 Speak = Callable[[str], Awaitable[None]]
+
+# Spoken refusals. DENY: the verb is on Guard's denylist. ASK: the action wants
+# confirmation and nothing in the repo can ask for it yet, so it fails closed.
+_DENIED_REPLY = "Sorry sir, I'm not permitted to do that."
+_ASK_REPLY = (
+    "That one needs your say-so, sir, and I have no way to ask you yet — so I haven't done it."
+)
 
 
 async def _silent(_text: str) -> None:
@@ -51,6 +67,10 @@ class _RouterLike(Protocol):  # structural — matches Brain's RouterLike
     async def model_call(
         self, messages: list[dict[str, object]], tier_hint: Tier, max_tokens: int = ...
     ) -> ModelResponse: ...
+
+
+class _GuardLike(Protocol):  # structural — a real edith.guard.Guard satisfies it
+    def authorize(self, action: str, *, needs_confirmation: bool = False) -> Decision: ...
 
 
 _CLASSIFY_PROMPT = (
@@ -91,11 +111,15 @@ class DesktopControlSkill:
         resolver: RepoResolver | None = None,
         router: _RouterLike | None = None,
         speak: Speak = _silent,
+        guard: _GuardLike | None = None,
     ) -> None:
         self._runner = runner
         self._resolver = resolver if resolver is not None else RepoResolver()
         self._router = router
         self._speak = speak
+        # Autonomy gate (spec 11). None → no gate, unchanged behaviour; edithd injects
+        # the daemon's single Guard.
+        self._guard = guard
 
     async def run(self, context: SkillContext) -> SkillResult:
         action = parse_command(context.utterance)
@@ -107,11 +131,28 @@ class DesktopControlSkill:
             # recall→answer loop instead of dead-ending on "I didn't catch that".
             return SkillResult(skill=self.name, handled=False)
 
+        # AUTONOMY GATE (spec 11) — before any Runner call, so a refused action has no
+        # OS side effect. handled=True: refusing IS handling the turn; falling through
+        # would have Brain answer an utterance we just declined to act on.
+        decision = self._authorize(action)
+        if decision is not Decision.ALLOW:
+            return await self._speak_result(
+                _DENIED_REPLY if decision is Decision.DENY else _ASK_REPLY
+            )
+
         if action.intent is Intent.OPEN_APP:
             return await self._open_app(action)
         if action.intent is Intent.SPOTIFY:
             return await self._spotify(action)
         return await self._terminal(action)
+
+    def _authorize(self, action: DesktopAction) -> Decision:
+        """Put the action's verb to the Guard. No guard wired → ALLOW (unchanged)."""
+        if self._guard is None:
+            return Decision.ALLOW
+        return self._guard.authorize(
+            action.intent.value, needs_confirmation=self.needs_confirmation
+        )
 
     async def _speak_result(self, summary: str) -> SkillResult:
         """Speak a summary (success or correction) and return a handled result."""
@@ -120,6 +161,18 @@ class DesktopControlSkill:
 
     async def _open_app(self, action: DesktopAction) -> SkillResult:
         app = action.app or ""
+        # Refuse a bundle PATH, accept a bundle NAME.
+        #
+        # `_OPEN_APP`'s `(.+?)` captures anything after "open", and `open -a` happily takes an
+        # absolute path — so "open /tmp/evil.app" executes an attacker-planted bundle with the
+        # owner's privileges, reachable by anyone within earshot of the mic. Guard's denylist
+        # cannot catch this: it matches the *intent* verb ("open_app"), never the argument.
+        # Rejecting paths rather than allowlisting app names keeps "open Slack" working while
+        # removing the arbitrary-executable primitive, which is the part that is dangerous.
+        if "/" in app or app.startswith("."):
+            return await self._speak_result(
+                f"Sorry sir, I'll only open apps by name, not by path — not {app}."
+            )
         rc, _out = await launch_app(app, runner=self._runner)
         if rc != 0:
             return await self._speak_result(f"Sorry sir, I couldn't open {app}.")

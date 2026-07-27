@@ -58,8 +58,11 @@ class Decision(Enum):
 class Guard:
     """Policy + counter: the autonomy gate and the per-window token budget.
 
-    Pure and headless. Construct one per daemon; the lead injects its
-    ``budget_check`` into the Router and reads ``budget_used`` in the Control API.
+    Pure and headless. Construct exactly ONE per daemon — a shared window is the point,
+    since a per-subsystem Guard would give each subsystem its own budget, which is not a
+    budget. ``edith/daemon/__main__.py`` builds it before the Router and hands the same
+    instance to ``Router`` (``budget_check`` + ``record``) and ``EdithDaemon`` (background
+    reasoner, Narrator gate, desktop autonomy gate, Control API ``budget_used``).
     """
 
     def __init__(
