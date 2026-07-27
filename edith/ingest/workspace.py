@@ -12,7 +12,9 @@ by org.
 
 Writes are SERIAL through one ``VectorMemoryStore`` — Kuzu embedded is single-writer, so this
 must never be parallelised across processes/agents. The repo *lister* is injected so the whole
-module is unit-tested with no network.
+module is unit-tested with no network. ``store`` is likewise injectable (spec 08 item 4): a
+caller that already holds the one live handle (e.g. ``edithd``'s scheduled refresh) passes it
+in and keeps owning it — this module then never opens a second Kuzu connection in-process.
 """
 
 from __future__ import annotations
@@ -23,9 +25,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 from edith.ingest.discover import DiscoveredRepo
 from edith.ingest.graph_map import build_metadata_graph
 from edith.memory.embeddings import Embedder
+from edith.memory.store import MemoryStore
 from edith.memory.vector import VectorMemoryStore
 
 # org -> list of flat metadata dicts (name/description/topics/language/html_url/pushed_at/archived)
@@ -66,20 +71,29 @@ def ingest_workspace(
     data_dir: str | Path = _DEFAULT_DATA_DIR,
     lister: RepoLister | None = None,
     embedder: Embedder | None = None,
+    store: MemoryStore | None = None,
     include_archived: bool = False,
     names: list[str] | None = None,
     limit: int | None = None,
 ) -> WorkspaceReport:
-    """Enumerate ``org`` and write a metadata Repo node + description Fact for each."""
+    """Enumerate ``org`` and write a metadata Repo node + description Fact for each.
+
+    ``store`` is an injectable seam (mirrors ``lister``/``embedder``): when provided, this
+    function writes through THAT handle and does NOT close it — the caller owns it (e.g. the
+    daemon's scheduled refresh, sharing the same handle Brain uses). When absent (the default),
+    behaviour is unchanged: a ``VectorMemoryStore`` is built from ``data_dir`` and closed here.
+    """
     repos = (lister or _gh_list_repos)(org)
     if names is not None:
         wanted = set(names)
         repos = [r for r in repos if str(r.get("name", "")) in wanted]
 
     report = WorkspaceReport(org=org)
-    db_path = Path(data_dir).expanduser() / "memory.kuzu"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    store = VectorMemoryStore(db_path, embedder=embedder)
+    owns_store = store is None
+    if store is None:
+        db_path = Path(data_dir).expanduser() / "memory.kuzu"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = VectorMemoryStore(db_path, embedder=embedder)
     try:
         written = 0
         for meta in repos:
@@ -104,12 +118,25 @@ def ingest_workspace(
             report.facts_written += sum(1 for n in nodes if n.label == "Fact")
         report.repos_written = written
     finally:
-        store.close()
+        if owns_store:
+            store.close()
     return report
 
 
+@retry(
+    retry=retry_if_exception_type(subprocess.CalledProcessError),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.2, max=2.0),
+    reraise=True,
+)
 def _gh_list_repos(org: str) -> list[dict[str, object]]:
-    """Enumerate every repo in ``org`` via the GitHub API (~17 paginated calls for 1600)."""
+    """Enumerate every repo in ``org`` via the GitHub API (~17 paginated calls for 1600).
+
+    Retried (mirrors the Router's ``_post_messages`` policy, spec 05): a single transient
+    ``gh`` failure must not abort the whole pass. This is for flakiness, NOT rate limits —
+    the call above is ~13 paginated requests for patterninc / 1 for ampmedia against a
+    5000/hr authenticated limit, nowhere near the ceiling.
+    """
     proc = subprocess.run(
         [
             "gh", "api", f"orgs/{org}/repos?per_page=100&type=all", "--paginate",
