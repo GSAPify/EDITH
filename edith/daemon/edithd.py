@@ -28,6 +28,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
+import subprocess
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -44,6 +48,7 @@ from edith.daemon.securestore import LocalSecureStore, SecureStore
 from edith.daemon.state import RuntimeState
 from edith.finder import ResolveResult
 from edith.finder import resolve_repo as _resolve_repo_impl
+from edith.ingest.workspace import ingest_workspace
 from edith.memory.store import MemoryStore
 from edith.router import BackgroundReasoner
 from edith.session.bus import SessionBus
@@ -57,6 +62,24 @@ _SOCKET_NAME = "edithd.sock"
 # Spoken replies are read aloud → cap tight (spec 10 §Brevity; latency compounds
 # with endpointing + follow-up windows). Only applied on the voice-wired path.
 _VOICE_MAX_TOKENS = 120
+# Weekly graph refresh (spec 08 item 4): the two model-free `--workspace` orgs.
+# Deep extraction (Opus per repo) is explicitly out of scope — see the Completion Record.
+_GRAPH_REFRESH_ORGS: tuple[str, ...] = ("patterninc", "ampmedia")
+_GRAPH_REFRESH_INTERVAL_SECONDS = 7 * 24 * 3600.0
+# A transient failure (gh missing, one bad `gh` call surviving its own retries, a Kuzu/sqlite
+# write error) must not permanently kill the weekly loop — caught so the NEXT interval still
+# fires. Anything outside this declared set is a real bug and is allowed to surface.
+_GRAPH_REFRESH_ERRORS: tuple[type[Exception], ...] = (
+    OSError,                     # e.g. FileNotFoundError — the `gh` binary is missing
+    subprocess.SubprocessError,  # CalledProcessError once _gh_list_repos's own retries exhaust
+    RuntimeError,                # Kuzu query failures (verified: kuzu raises plain RuntimeError)
+    sqlite3.Error,                # sqlite-vec (embedding) write failures
+)
+# Bounded wait, on shutdown, for an in-flight refresh's WORKER THREAD to actually finish
+# writing before compact()/close() touch the same Memory handle (cancelling the awaiting
+# task does not stop that thread — see _graph_refresh_loop). A little over the measured
+# ~1.3-min full pass.
+_GRAPH_REFRESH_SHUTDOWN_JOIN_TIMEOUT = 120.0
 
 
 class VoiceIOLike(Protocol):
@@ -125,6 +148,9 @@ class EdithDaemon:
         voice: VoiceIOLike | None = None,
         enable_session_awareness: bool = False,
         enable_voice: bool = False,
+        enable_graph_refresh: bool = False,
+        graph_refresh_interval_seconds: float = _GRAPH_REFRESH_INTERVAL_SECONDS,
+        graph_refresh_fn: Callable[[], None] | None = None,
         bus: EventBus | None = None,
     ) -> None:
         self._secrets = secrets  # held in RAM only; never logged
@@ -147,6 +173,26 @@ class EdithDaemon:
         # Run the live mic/wake/STT loop as a background task (spec 10). Gated so
         # unit tests never open a mic; requires a real VoiceIO. Off by default.
         self._enable_voice = enable_voice
+        # Weekly graph refresh (spec 08 item 4): model-free `--workspace` passes +
+        # a reembed backfill, run as a background task. Off by default so every
+        # existing test and the plain daemon are unaffected. Interval + the refresh
+        # callable are both injectable so tests never wait a real week or touch the
+        # network (see _start_graph_refresh / _graph_refresh_loop).
+        self._enable_graph_refresh = enable_graph_refresh
+        self._graph_refresh_interval = graph_refresh_interval_seconds
+        self._graph_refresh_fn = graph_refresh_fn
+        self._graph_refresh_task: asyncio.Task[None] | None = None
+        # True only while a refresh is actually writing (not merely scheduled). Folded into
+        # Brain's is_paused predicate below so a live turn never runs recall/remember on the
+        # loop thread while the refresh writes the SAME Memory handle from a worker thread
+        # (see the Completion Record for why this, not a cross-thread lock, was chosen).
+        self._graph_refresh_in_progress = False
+        # Set by the WORKER THREAD itself (in its own finally), not by the coroutine — so it
+        # reflects the thread truly finishing even if the awaiting task was cancelled out from
+        # under it (asyncio.to_thread cannot interrupt an already-running thread). stop() waits
+        # on this, bounded, before compact()/close() touch the same Memory handle.
+        self._graph_refresh_thread_idle = threading.Event()
+        self._graph_refresh_thread_idle.set()
         self._store: SecureStore = secure_store or LocalSecureStore(data_dir)
         self._budget: BudgetView = budget or _ZeroBudget()
         self.state = RuntimeState()
@@ -229,7 +275,15 @@ class EdithDaemon:
             # Skip a pass while PAUSED (privacy) OR STOPPING — the latter makes the
             # docstring's "STOPPING blocks Brain" real and prevents a late mic
             # utterance from running recall/remember against a closing Kuzu handle.
-            is_paused=lambda: self.state.is_paused or self.state.is_stopping,
+            # OR while a graph refresh is actually writing (spec 08 item 4): Kuzu's
+            # Connection is single-writer and not documented safe for concurrent
+            # multi-thread use, so a turn on the loop thread must not run recall/
+            # remember while the refresh writes the SAME handle from a worker thread.
+            is_paused=lambda: (
+                self.state.is_paused
+                or self.state.is_stopping
+                or self._graph_refresh_in_progress
+            ),
             resolve_repo=resolver,
             skills=[pr_skill, session_skill, desktop_skill],
             history=TurnBuffer() if voiced else None,
@@ -250,6 +304,10 @@ class EdithDaemon:
         # Live transcript tap + idle narration — only when explicitly enabled.
         if self._enable_session_awareness:
             self._start_session_awareness(speak)
+
+        # Weekly graph refresh (spec 08 item 4) — only when explicitly enabled.
+        if self._enable_graph_refresh:
+            self._start_graph_refresh()
 
         # 5. start the Control API server on the unix socket.
         # VoiceIO pause/resume: mirror Control API transitions into voice.set_paused()
@@ -349,6 +407,115 @@ class EdithDaemon:
             await asyncio.sleep(interval)
             await narrator.tick()
 
+    def _start_graph_refresh(self) -> None:
+        """Start the weekly model-free graph refresh as a background task (spec 08 item 4).
+
+        Uses the injected ``graph_refresh_fn`` if given (tests); otherwise, when Memory is a
+        concrete ``MemoryStore``, builds the real default bound to THAT handle (mirrors
+        ``_make_default_resolver``) — never a second Kuzu connection. With neither (a fake
+        Memory in a test that also didn't inject a refresh_fn), there is nothing to run, so
+        this is a no-op — ``enable_graph_refresh`` stays opt-in and never breaks such a test.
+        """
+        refresh_fn = self._graph_refresh_fn
+        if refresh_fn is None:
+            if not isinstance(self._memory, MemoryStore):
+                return
+            refresh_fn = self._make_default_graph_refresh(self._memory)
+        loop = asyncio.get_running_loop()
+        self._graph_refresh_task = loop.create_task(
+            self._graph_refresh_loop(refresh_fn, self._graph_refresh_interval)
+        )
+
+    @staticmethod
+    def _make_default_graph_refresh(store: MemoryStore) -> Callable[[], None]:
+        """The real weekly pass: both orgs' metadata graph + a local reembed backfill.
+
+        Model-free — ``ingest_workspace`` is the GitHub-API metadata pass (no clones, no
+        model calls) and ``backfill_embeddings`` is the local sqlite-vec embedder (no
+        Bifrost). Deep extraction (Opus per repo, ~2600 calls) is explicitly OUT OF SCOPE —
+        see the Completion Record. Runs through the injected-store seam so this never opens
+        a second Kuzu connection alongside the daemon's own.
+        """
+
+        def refresh() -> None:
+            for org in _GRAPH_REFRESH_ORGS:
+                ingest_workspace(org, store=store)
+            backfill = getattr(store, "backfill_embeddings", None)
+            if callable(backfill):
+                backfill()
+
+        return refresh
+
+    def _wrap_graph_refresh_for_thread(self, refresh_fn: Callable[[], None]) -> Callable[[], bool]:
+        """Wrap ``refresh_fn`` to run entirely inside the worker thread it's given to.
+
+        Both the error containment AND the ``_graph_refresh_thread_idle`` completion signal
+        live HERE, inside the thread body — not in the coroutine's ``finally`` — so they are
+        accurate even if the awaiting task is cancelled out from under an already-running
+        thread (``stop()`` waits on this event; see its docstring). Returns True on success,
+        False on a declared, expected failure (mirrors ``BackgroundReasoner._run``'s declared
+        MODEL_CALL_ERRORS catch — not a bare except; anything outside ``_GRAPH_REFRESH_ERRORS``
+        is a real bug and is allowed to surface via "Task exception was never retrieved").
+        """
+
+        def run() -> bool:
+            try:
+                refresh_fn()
+                return True
+            except _GRAPH_REFRESH_ERRORS:
+                return False
+            finally:
+                self._graph_refresh_thread_idle.set()
+
+        return run
+
+    async def _graph_refresh_loop(
+        self, refresh_fn: Callable[[], None], interval: float
+    ) -> None:
+        """Refresh, then sleep ``interval``, forever (spec 08 item 4); cancelled in ``stop()``.
+
+        Refresh-FIRST (not sleep-first): under launchd ``KeepAlive`` the daemon can restart far
+        more often than weekly, and a sleep-first loop would reset the wait on every restart —
+        plausibly never firing again once the graph goes stale (the whole premise of this item).
+        Every write here is an idempotent MERGE-upsert (``store.py``'s ``_upsert_node``), so
+        re-running on a fast restart loop is wasted work, not a correctness problem; a persisted
+        last-refresh timestamp to avoid that waste is a separate, out-of-scope PR.
+
+        The refresh runs in a worker thread via ``asyncio.to_thread`` (precedent:
+        ``_start_voice_loop`` / ``voice/live.py``) so the ~1.3-min write pass never blocks the
+        event loop. While it is in flight, ``_graph_refresh_in_progress`` is True, which — via
+        the ``is_paused`` predicate wired into Brain in ``start()`` — makes Brain skip any
+        turn's recall/remember for that window (no reply at all, not even an apology — the
+        honest cost of this design; see the Completion Record) rather than run it concurrently
+        against the same Kuzu ``Connection`` from a second thread. Setting/clearing that flag
+        and checking ``is_paused``/``is_stopping`` all happen on this single event-loop thread
+        (cooperative asyncio), so there is no race in the flag itself — only the window it
+        protects. ``self.state.last_event`` is updated around the pass so Control API ``status``
+        shows it actually ran (otherwise there would be no observable signal at all).
+
+        NOTE — a narrower residual gap, stated rather than hidden: this gates Brain's live-turn
+        pass only. ``BackgroundReasoner``'s ``on_done`` callback (``brain/loop.py``) and
+        ``finder/resolve.py``'s fire-and-forget ``_deep_extract`` both call ``store.remember``
+        from the loop thread WITHOUT checking ``is_paused`` at all — they could theoretically
+        still race a refresh's worker thread. Gating those two is a separate cross-cutting
+        change (they're both async-task callbacks landing at an arbitrary later time, not a
+        single call site); out of scope here, flagged for a follow-up.
+        """
+        wrapped = self._wrap_graph_refresh_for_thread(refresh_fn)
+        while True:
+            if self.state.is_paused or self.state.is_stopping:
+                await asyncio.sleep(interval)
+                continue  # respect pause: skip this cycle, retry after the next interval
+            self._graph_refresh_in_progress = True
+            self._graph_refresh_thread_idle.clear()
+            self.state.last_event = "graph_refresh.started"
+            try:
+                ok = await asyncio.to_thread(wrapped)
+                self.state.last_event = "graph_refresh.done" if ok else "graph_refresh.failed"
+            finally:
+                self._graph_refresh_in_progress = False
+            await asyncio.sleep(interval)
+
     def _on_kill(self) -> None:
         """Control API ``kill`` handler: schedule graceful shutdown.
 
@@ -375,6 +542,20 @@ class EdithDaemon:
         if self._voice_task is not None:
             self._voice_task.cancel()
             self._voice_task = None
+        # Cancel the graph-refresh loop (spec 08 item 4): stops it from starting another
+        # cycle. This does NOT stop an already-running worker thread (asyncio.to_thread
+        # can't interrupt one) — join it below, BEFORE compact()/close() touch the same
+        # Memory handle the thread may still be writing to.
+        if self._graph_refresh_task is not None:
+            self._graph_refresh_task.cancel()
+            self._graph_refresh_task = None
+        # Bounded join on the real worker thread (set by ITSELF, not by the cancelled task
+        # above — see _wrap_graph_refresh_for_thread). Runs off the loop via to_thread so a
+        # slow-to-finish refresh doesn't freeze the event loop while shutdown waits on it.
+        if not self._graph_refresh_thread_idle.is_set():
+            await asyncio.to_thread(
+                self._graph_refresh_thread_idle.wait, _GRAPH_REFRESH_SHUTDOWN_JOIN_TIMEOUT
+            )
         # Cancel any in-flight background opus jobs (spec 13 §Shutdown ownership) — a job can
         # outlive the turn that started it; don't leave an opus call dangling past shutdown.
         if self._reasoner is not None:
