@@ -145,3 +145,42 @@ def test_menubar_does_not_import_the_daemon_module_at_runtime() -> None:
     ).stdout.strip()
 
     assert out == "", f"edith.menubar.app pulled in heavy modules at import: {out}"
+
+
+def test_built_app_has_a_visible_title() -> None:
+    """A rumps status item with no title AND no icon renders zero-width — invisible.
+
+    Regression guard for a live failure: `super().__init__(NOT_RUNNING_LABEL)` passed the
+    label as rumps' `name` (an internal identifier), leaving title=None and icon=None. The
+    process ran healthy at 0% CPU with no stderr and simply drew nothing in the menu bar.
+
+    This is checkable without starting the event loop — build_app() returns the object — so
+    the one property that makes the app visible at all is no longer owner-smoke-only.
+    """
+    pytest.importorskip("rumps", reason="the [menubar] extra is optional")
+    from edith.menubar.app import build_app
+
+    app = build_app("/tmp/does-not-exist.sock")
+
+    assert app.title, "status item has no title — it will render zero-width and invisible"
+    assert app.title.strip(), "whitespace-only title renders as an invisible item"
+
+
+def test_build_app_escapes_the_prohibited_activation_policy() -> None:
+    """The app must claim Accessory policy, or macOS never draws the status item.
+
+    A non-framework Python (every uv-managed interpreter — `python-build-standalone` reports
+    an empty PYTHONFRAMEWORK) gets NSApplicationActivationPolicyProhibited (2), which forbids
+    presenting any UI. NSStatusBar still hands out an item without error, so the process looks
+    completely healthy and renders nothing. Accessory (1) is menu-bar-visible, Dock-absent.
+    """
+    pytest.importorskip("rumps", reason="the [menubar] extra is optional")
+    appkit = pytest.importorskip("AppKit")
+    from edith.menubar.app import build_app
+
+    build_app("/tmp/does-not-exist.sock")
+
+    policy = appkit.NSApplication.sharedApplication().activationPolicy()
+    assert policy == appkit.NSApplicationActivationPolicyAccessory, (
+        f"activation policy is {policy}; 2=Prohibited means the item is created but never drawn"
+    )
