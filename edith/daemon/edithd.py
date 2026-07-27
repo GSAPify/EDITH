@@ -48,8 +48,8 @@ from edith.daemon.securestore import LocalSecureStore, SecureStore
 from edith.daemon.state import RuntimeState
 from edith.finder import ResolveResult
 from edith.finder import resolve_repo as _resolve_repo_impl
-from edith.ingest.workspace import ingest_workspace
 from edith.guard import Guard
+from edith.ingest.workspace import ingest_workspace
 from edith.memory.store import MemoryStore
 from edith.router import BackgroundReasoner, Tier
 from edith.session.bus import SessionBus
