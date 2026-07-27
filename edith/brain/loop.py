@@ -37,7 +37,7 @@ from edith.bus import Event, EventBus
 from edith.finder import ResolveResult, ResolveStatus
 from edith.memory.secrets import sanitize_text
 from edith.memory.store import Edge, Node
-from edith.router import MODEL_CALL_ERRORS, BackgroundJob, ModelResponse, Tier
+from edith.router import MODEL_CALL_ERRORS, BackgroundJob, JobStatus, ModelResponse, Tier
 from edith.router.tiers import DEEP_TOKENS, estimate_tokens
 from edith.skills import Skill, SkillContext
 
@@ -63,6 +63,13 @@ _THINK_PHRASE = re.compile(r"(?<!you )\bthink\s+(?:about|on)\b", re.IGNORECASE)
 # Spoken immediately when a background reasoning job is kicked off (the live turn ends here;
 # the real answer arrives later via brain.background_done — spec 13 §Purpose).
 _THINKING_ACK = "On it, sir — I'll think that through and ping you when I have something."
+
+# Spoken INSTEAD of the ack when Guard's budget denies the opus job (spec 11). Without this
+# the owner hears "I'll ping you when I have something" for a job that never started and
+# never will — a silent drop. Budget exhaustion must be audible, not invisible.
+_THINKING_DENIED = (
+    "I'm out of deep-thinking budget for now, sir — I'll have to skip the background pass."
+)
 
 # System prompt for the Sonnet summary of a finished opus job (spec 13 §on_done). The full
 # opus detail is persisted to Memory; the owner hears this short spoken summary.
@@ -192,8 +199,11 @@ class Brain:
         # phrase falls straight through to the ordinary recall→answer path below.
         if self._reasoner is not None and _THINK_PHRASE.search(utterance):
             recalled = self._memory.recall(utterance)
-            await self._start_background(self._build_messages(utterance, recalled), utterance)
-            await self._publish_decision(_THINKING_ACK)
+            job = await self._start_background(
+                self._build_messages(utterance, recalled), utterance
+            )
+            denied = job.status is JobStatus.DENIED
+            await self._publish_decision(_THINKING_DENIED if denied else _THINKING_ACK)
             return
 
         # 1. RECALL
@@ -281,10 +291,14 @@ class Brain:
 
     async def _start_background(
         self, messages: list[dict[str, object]], utterance: str
-    ) -> None:
-        """Fire a background opus job for ``messages``; on completion it summarizes + pings."""
+    ) -> BackgroundJob:
+        """Fire a background opus job for ``messages``; on completion it summarizes + pings.
+
+        Returns the handle so the caller can see a budget-DENIED job (which never started)
+        and say so instead of promising a ping that will never come.
+        """
         assert self._reasoner is not None  # guarded by every caller
-        await self._reasoner.think_async(messages, self._make_on_done(utterance))
+        return await self._reasoner.think_async(messages, self._make_on_done(utterance))
 
     def _make_on_done(self, utterance: str) -> Callable[[ModelResponse], Awaitable[None]]:
         """Build the completion callback: remember full detail → Sonnet-summarize → ping.

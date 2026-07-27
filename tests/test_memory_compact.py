@@ -8,6 +8,8 @@ ordering — matching production writes (str(time.time())).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from edith.memory.embeddings import LocalEmbedder
@@ -44,7 +46,7 @@ def _repo_node(i: int) -> Node:
 
 
 class TestMemoryStoreCompact:
-    def test_compact_evicts_oldest_keeps_newest(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_compact_evicts_oldest_keeps_newest(self, tmp_path: Path) -> None:
         """Seeding 10 conv Facts with max=5 must keep the 5 newest, evict the 5 oldest."""
         store = MemoryStore(tmp_path / "mem.kuzu")
         for i in range(10):
@@ -63,7 +65,7 @@ class TestMemoryStoreCompact:
             ts = str(_BASE_TS + i)
             assert f"conv-{ts}" not in surviving_ids, f"oldest conv-{ts} was wrongly kept"
 
-    def test_non_conversation_facts_never_evicted(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_non_conversation_facts_never_evicted(self, tmp_path: Path) -> None:
         """repo-* and other non-conv Facts must survive regardless of count."""
         store = MemoryStore(tmp_path / "mem.kuzu")
         # Seed 10 conv Facts and 3 non-conv Facts.
@@ -78,7 +80,7 @@ class TestMemoryStoreCompact:
         for i in range(3):
             assert f"repo-{i}" in surviving_ids, f"non-conv repo-{i} was wrongly evicted"
 
-    def test_compact_with_edge_on_evictable_fact(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_compact_with_edge_on_evictable_fact(self, tmp_path: Path) -> None:
         """An evictable Fact WITH a relates_to edge must be deleted without error.
 
         Uses DETACH DELETE to also remove the edge atomically.
@@ -105,7 +107,7 @@ class TestMemoryStoreCompact:
         surviving_ids = _fact_ids(store)
         assert f"conv-{oldest_ts}" not in surviving_ids
 
-    def test_compact_idempotent(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_compact_idempotent(self, tmp_path: Path) -> None:
         """A second compact() with the same limit must evict 0 additional nodes."""
         store = MemoryStore(tmp_path / "mem.kuzu")
         for i in range(8):
@@ -117,7 +119,7 @@ class TestMemoryStoreCompact:
         second = store.compact(max_conversation_facts=5)
         assert second == 0, f"second compact() should evict 0, got {second}"
 
-    def test_compact_under_limit_evicts_nothing(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_compact_under_limit_evicts_nothing(self, tmp_path: Path) -> None:
         """When conv Fact count is already <= max, evicted count must be 0."""
         store = MemoryStore(tmp_path / "mem.kuzu")
         for i in range(3):
@@ -128,7 +130,7 @@ class TestMemoryStoreCompact:
         assert evicted == 0
         assert store.count("Fact") == 3
 
-    def test_compact_returns_evicted_count(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_compact_returns_evicted_count(self, tmp_path: Path) -> None:
         """Return value must equal number of nodes deleted."""
         store = MemoryStore(tmp_path / "mem.kuzu")
         for i in range(20):
@@ -150,7 +152,7 @@ def embedder() -> LocalEmbedder:
 
 class TestVectorMemoryStoreCompact:
     def test_compact_evicts_oldest_and_removes_embeddings(
-        self, tmp_path: pytest.TempPathFactory, embedder: LocalEmbedder
+        self, tmp_path: Path, embedder: LocalEmbedder
     ) -> None:
         """Evicted conv Facts must have their rows removed from BOTH fact_vectors and fact_map."""
         store = VectorMemoryStore(tmp_path / "mem.kuzu", embedder=embedder)
@@ -172,7 +174,7 @@ class TestVectorMemoryStoreCompact:
         _assert_no_orphans(store)
 
     def test_no_orphaned_fact_vectors_after_compact(
-        self, tmp_path: pytest.TempPathFactory, embedder: LocalEmbedder
+        self, tmp_path: Path, embedder: LocalEmbedder
     ) -> None:
         """fact_vectors and fact_map must contain NO rows for evicted Fact ids."""
         store = VectorMemoryStore(tmp_path / "mem.kuzu", embedder=embedder)
@@ -205,7 +207,7 @@ class TestVectorMemoryStoreCompact:
         )
 
     def test_compact_idempotent_no_orphans(
-        self, tmp_path: pytest.TempPathFactory, embedder: LocalEmbedder
+        self, tmp_path: Path, embedder: LocalEmbedder
     ) -> None:
         """Running compact() twice must leave zero orphans and evict 0 on the second call."""
         store = VectorMemoryStore(tmp_path / "mem.kuzu", embedder=embedder)
@@ -219,7 +221,7 @@ class TestVectorMemoryStoreCompact:
         _assert_no_orphans(store)
 
     def test_non_conversation_facts_embeddings_untouched(
-        self, tmp_path: pytest.TempPathFactory, embedder: LocalEmbedder
+        self, tmp_path: Path, embedder: LocalEmbedder
     ) -> None:
         """compact() must not remove embeddings for non-conv Facts."""
         store = VectorMemoryStore(tmp_path / "mem.kuzu", embedder=embedder)

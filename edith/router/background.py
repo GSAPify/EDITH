@@ -132,9 +132,10 @@ class BackgroundReasoner:
         budget_check: BudgetCheck = lambda _tier: True,
     ) -> None:
         self._router = router
-        # Guard seam: opus is the expensive tier → gate before starting. `edith/guard/guard.py`
-        # (merged, PR #17) is the intended injection here once the composition root constructs
-        # a Guard; the default stays permissive so nothing changes until it does.
+        # Guard seam: opus is the expensive tier → gate before starting. edithd injects the
+        # daemon Guard's ``budget_check`` here (spec 11), so background opus is the FIRST
+        # thing cut as the budget runs down — Guard reserves the tail for the live voice.
+        # The default stays permissive for a standalone reasoner.
         self._budget_check = budget_check
         self._tasks: set[asyncio.Task[None]] = set()
         self._ids = count(1)

@@ -25,13 +25,14 @@ import httpx
 
 from edith.bus import EventBus
 from edith.daemon.edithd import EdithDaemon, resolve_secrets
+from edith.guard import Guard
 from edith.memory.vector import VectorMemoryStore
 from edith.router import Router, Tier
 
 _DEFAULT_DATA_DIR = "~/.edith/data"
 
 
-def _build_router(client: httpx.AsyncClient, api_key: str) -> Router:
+def _build_router(client: httpx.AsyncClient, api_key: str, guard: Guard) -> Router:
     # NOTE: Bifrost model ids are duplicated from edith.voice.__main__ — a drift risk
     # (owner guardrail on stale hardcoded constants). TODO(config): centralize a
     # tier→model map both entry points read.
@@ -40,7 +41,16 @@ def _build_router(client: httpx.AsyncClient, api_key: str) -> Router:
         Tier.SONNET: os.environ.get("BIFROST_MODEL_SONNET", "claude-sonnet-4-6"),
         Tier.OPUS: os.environ.get("BIFROST_MODEL_OPUS", "claude-opus-4-8"),
     }
-    return Router(client, api_key, models)
+    # Guard's two Router touchpoints (spec 11): gate the tier before the call, charge the
+    # window after it. ``on_usage`` is what makes ``budget_used`` move at all — without it
+    # the budget is theatre.
+    return Router(
+        client,
+        api_key,
+        models,
+        budget_check=guard.budget_check,
+        on_usage=guard.record,
+    )
 
 
 async def _amain(engine: str, data_dir: str, graph_refresh: bool = False) -> int:
@@ -63,13 +73,18 @@ async def _amain(engine: str, data_dir: str, graph_refresh: bool = False) -> int
     expanded = os.path.expanduser(data_dir)
     store = VectorMemoryStore(os.path.join(expanded, "memory.kuzu"))
     client = httpx.AsyncClient(base_url=secrets.bifrost_base_url, timeout=30.0)
-    router = _build_router(client, secrets.bifrost_api_key)
+    # ONE Guard for this daemon process, built BEFORE the Router so the ordering makes the
+    # sharing structural: the same instance gates+meters the Router and is handed to the
+    # daemon for the reasoner / narrator / desktop / Control API seams.
+    guard = Guard()
+    router = _build_router(client, secrets.bifrost_api_key, guard)
 
     daemon = EdithDaemon(
         expanded,
         secrets,
         memory=store,
         router=router,
+        guard=guard,
         bus=bus,
         voice=voice,
         enable_voice=True,

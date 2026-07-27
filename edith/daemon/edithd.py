@@ -43,14 +43,15 @@ from edith.brain import Brain
 from edith.brain.history import TurnBuffer
 from edith.brain.loop import MemoryLike, ResolveRepoLike, RouterLike
 from edith.bus import Event, EventBus
-from edith.daemon.control import BudgetView, ControlServer
+from edith.daemon.control import ControlServer
 from edith.daemon.securestore import LocalSecureStore, SecureStore
 from edith.daemon.state import RuntimeState
 from edith.finder import ResolveResult
 from edith.finder import resolve_repo as _resolve_repo_impl
 from edith.ingest.workspace import ingest_workspace
+from edith.guard import Guard
 from edith.memory.store import MemoryStore
-from edith.router import BackgroundReasoner
+from edith.router import BackgroundReasoner, Tier
 from edith.session.bus import SessionBus
 from edith.session.collector import TranscriptCollector
 from edith.session.narrator import Narrator
@@ -125,14 +126,6 @@ def _from_keyring(user: str) -> str | None:
         return None
 
 
-class _ZeroBudget:
-    """Budget seam until Guard lands (Control API ``budget_used`` -> 0)."""
-
-    def budget_used(self) -> int:
-        # TODO(Guard): Guard owns the real per-window budget counter.
-        return 0
-
-
 class EdithDaemon:
     """Composes the subsystems and runs the daemon lifecycle."""
 
@@ -143,7 +136,7 @@ class EdithDaemon:
         memory: MemoryLike,
         router: RouterLike,
         secure_store: SecureStore | None = None,
-        budget: BudgetView | None = None,
+        guard: Guard | None = None,
         resolve_repo: ResolveRepoLike | None = None,
         voice: VoiceIOLike | None = None,
         enable_session_awareness: bool = False,
@@ -194,7 +187,13 @@ class EdithDaemon:
         self._graph_refresh_thread_idle = threading.Event()
         self._graph_refresh_thread_idle.set()
         self._store: SecureStore = secure_store or LocalSecureStore(data_dir)
-        self._budget: BudgetView = budget or _ZeroBudget()
+        # ONE Guard per daemon (spec 11): a single shared window is the whole point — a
+        # per-subsystem Guard would give each its own budget, which is not a budget. It
+        # feeds four seams below (Router is fed by the composition root) plus the Control
+        # API's budget_used. NOTE: the composition root MUST pass the same Guard it gave
+        # the Router — a Guard built here while the Router keeps its permissive default
+        # means the counter never decrements and nothing says so.
+        self._guard = guard if guard is not None else Guard()
         self.state = RuntimeState()
         # A caller may inject the bus so a VoiceIO built on the SAME bus can be passed
         # as ``voice`` (the composition root does this — spec 10). Default: our own.
@@ -255,14 +254,18 @@ class EdithDaemon:
         # actions (spec 06). Registered LAST: its triggers are broad ("open ", "play "),
         # so the more specific pr-review / session skills claim their turns first. Speak
         # feedback when VoiceIO is wired; the router enables the haiku classify fallback.
+        # Guard gates it (spec 11): a denylisted OS verb is refused, spoken, and never run.
         desktop_skill = (
-            DesktopControlSkill(router=self._router, speak=speak)
+            DesktopControlSkill(router=self._router, speak=speak, guard=self._guard)
             if speak is not None
-            else DesktopControlSkill(router=self._router)
+            else DesktopControlSkill(router=self._router, guard=self._guard)
         )
         # Background reasoner (spec 13): opus deep work that never blocks the live turn. Built
-        # from the injected router; Guard's real budget is deferred so it defaults to allow.
-        self._reasoner = BackgroundReasoner(self._router)
+        # from the injected router and gated by Guard — opus is the first thing cut when the
+        # budget runs down (Guard reserves the tail for the live voice).
+        self._reasoner = BackgroundReasoner(
+            self._router, budget_check=self._guard.budget_check
+        )
 
         # On the voice-wired path, give Brain the spoken persona, a tight token cap,
         # and an in-session recent-turns buffer so it answers by voice with cross-turn
@@ -317,7 +320,7 @@ class EdithDaemon:
         self._control = ControlServer(
             socket_path=self.socket_path,
             state=self.state,
-            budget=self._budget,
+            budget=self._guard,
             on_kill=self._on_kill,
             on_pause=(lambda: _voice.set_paused(True)) if _voice is not None else (lambda: None),
             on_resume=(lambda: _voice.set_paused(False)) if _voice is not None else (lambda: None),
@@ -388,10 +391,16 @@ class EdithDaemon:
         async def _silent(_text: str) -> None:
             return None
 
+        # Narrator's budget_gate is zero-arg, so bind the tier it actually calls at:
+        # _narrate_error uses Tier.HAIKU. On exhaustion the gate returns False and the
+        # Narrator takes its SPOKEN-LOCAL template branch — she still speaks, just
+        # without a model call. Narration degrades; it does not go silent.
+        guard = self._guard
         narrator = Narrator(
             self.bus,
             speak if callable(speak) else _silent,  # type: ignore[arg-type]
             router=self._router,
+            budget_gate=lambda: guard.budget_check(Tier.HAIKU),
         )
         collector = TranscriptCollector(self._session_bus.ingest)
         loop = asyncio.get_running_loop()

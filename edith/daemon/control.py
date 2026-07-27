@@ -11,8 +11,8 @@ filesystem path, never a TCP port (north-star §4.2: "socket only, NEVER a publi
 network bind"). The socket file is created 0600 (owner-only) so no other local
 user can drive the daemon. On ``stop`` the socket file is removed.
 
-``budget_used`` comes from an injected ``BudgetView``. The Guard component that
-owns the real budget is a later cross-cutting slice; the dev seam returns 0.
+``budget_used`` comes from an injected ``BudgetView`` — the daemon's single ``Guard``
+(spec 11), so the number the menu bar renders is real spend, not a stub.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ _SOCKET_MODE = 0o600
 class BudgetView(Protocol):
     """Read-only view of the per-window budget for ``status.budget_used``.
 
-    # TODO(Guard): Guard (a later cross-cutting slice) owns the real budget
-    # counter. Until then edithd injects a stub returning 0. This Protocol is
-    # the seam; do not build Guard here.
+    ``edith.guard.Guard`` satisfies this structurally and is what edithd now injects
+    (spec 11), so ``status.budget_used`` reports the daemon's real window usage. The
+    Protocol stays as the seam — the Control API must not depend on Guard's concrete type.
     """
 
     def budget_used(self) -> int: ...
