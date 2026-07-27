@@ -57,14 +57,44 @@ def _require_rumps():
     return rumps
 
 
+def _become_menu_bar_app() -> None:
+    """Force NSApplicationActivationPolicyAccessory so the status item actually renders.
+
+    macOS gives a non-framework Python ``NSApplicationActivationPolicyProhibited`` (2), which
+    forbids the process from presenting ANY UI. The status item is still created without error
+    — ``NSStatusBar.statusItemWithLength_`` succeeds — and is then silently never drawn. The
+    symptom is a healthy process at 0% CPU with empty stderr and nothing in the menu bar.
+
+    ``uv``-managed interpreters are exactly this case: ``python-build-standalone`` reports an
+    empty ``PYTHONFRAMEWORK``. Since ``.venv`` here is uv-created, the menu bar could not work
+    at all without this. Accessory (1) = visible in the menu bar, absent from the Dock and the
+    app switcher, which is precisely what a status-bar app wants.
+
+    Best-effort: a framework build or a bundled .app is already permitted, where this is a
+    harmless no-op.
+    """
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    except ImportError:  # pyobjc absent — rumps could not have imported either
+        return
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory
+    )
+
+
 def build_app(socket_path: str | None = None):
     """Construct the ``rumps.App`` instance. Raises ``ImportError`` if ``rumps`` is missing."""
     rumps = _require_rumps()
+    _become_menu_bar_app()
     controller = MenuBarController(ControlClient(socket_path or default_socket_path()))
 
     class EdithMenuBarApp(rumps.App):
         def __init__(self) -> None:
-            super().__init__(NOT_RUNNING_LABEL)
+            # `name` is rumps' internal identity; `title` is what macOS actually draws.
+            # Passing the label positionally set only `name`, leaving title=None and
+            # icon=None — a status item with neither renders ZERO-WIDTH, so the app ran
+            # perfectly and was simply invisible in the menu bar. Always pass title=.
+            super().__init__("EDITH", title=NOT_RUNNING_LABEL)
             self.menu = ["Pause", "Resume", "Kill"]
 
         @rumps.timer(_POLL_SECONDS)
