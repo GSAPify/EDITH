@@ -53,7 +53,12 @@ def _build_router(client: httpx.AsyncClient, api_key: str, guard: Guard) -> Rout
     )
 
 
-async def _amain(engine: str, data_dir: str, graph_refresh: bool = False) -> int:
+async def _amain(
+    engine: str,
+    data_dir: str,
+    graph_refresh: bool = False,
+    session_narration: bool = True,
+) -> int:
     secrets = resolve_secrets()
     if not secrets.bifrost_base_url or not secrets.bifrost_api_key:
         print("[edithd] no Bifrost creds (BIFROST_BASE_URL / BIFROST_API_KEY) — "
@@ -88,7 +93,7 @@ async def _amain(engine: str, data_dir: str, graph_refresh: bool = False) -> int
         bus=bus,
         voice=voice,
         enable_voice=True,
-        enable_session_awareness=True,
+        enable_session_awareness=session_narration,
         enable_graph_refresh=graph_refresh,
     )
     await daemon.start()
@@ -110,6 +115,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--engine", default="piper", choices=["piper", "elevenlabs"])
     parser.add_argument("--data-dir", default=_DEFAULT_DATA_DIR)
     parser.add_argument(
+        "--no-session-narration",
+        action="store_true",
+        help=(
+            "stop narrating Claude Code session activity. Narration BLINDS THE WAKE WORD: "
+            "the half-duplex mic gate skips wake detection entirely while EDITH speaks, plus "
+            "a 2.5s cooldown after. With several active sessions she can talk almost "
+            "continuously and never hear 'Hey Edith'. Use this if wake stops responding."
+        ),
+    )
+    parser.add_argument(
         "--graph-refresh",
         action="store_true",
         help=(
@@ -122,7 +137,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        return asyncio.run(_amain(args.engine, args.data_dir, args.graph_refresh))
+        return asyncio.run(
+            _amain(
+                args.engine,
+                args.data_dir,
+                args.graph_refresh,
+                session_narration=not args.no_session_narration,
+            )
+        )
     except KeyboardInterrupt:
         return 0
 
