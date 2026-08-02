@@ -144,3 +144,34 @@ async def test_stop_cancels_outstanding_background_jobs(data_dir: Path) -> None:
     with pytest.raises(asyncio.CancelledError):
         await job.task
     assert job.status is JobStatus.CANCELLED
+
+
+def test_session_narration_can_be_disabled_from_the_cli() -> None:
+    """--no-session-narration must reach EdithDaemon, or wake stays deaf.
+
+    Narration blinds the wake word: _gate_action returns "skip" for every frame while
+    is_speaking, plus a 2.5s cooldown after. With several active Claude Code sessions the
+    Narrator can speak near-continuously and "Hey Edith" is never detected. The toggle was
+    hardcoded True with no way to turn it off — same class as --graph-refresh being
+    unreachable.
+    """
+    import edith.daemon.__main__ as dmain
+
+    seen: dict[str, object] = {}
+
+    async def fake_amain(engine, data_dir, graph_refresh=False, session_narration=True):
+        seen.update(
+            engine=engine, graph_refresh=graph_refresh, session_narration=session_narration
+        )
+        return 0
+
+    original = dmain._amain
+    dmain._amain = fake_amain
+    try:
+        assert dmain.main(["--no-session-narration"]) == 0
+        assert seen["session_narration"] is False
+        seen.clear()
+        assert dmain.main([]) == 0
+        assert seen["session_narration"] is True  # default unchanged
+    finally:
+        dmain._amain = original
