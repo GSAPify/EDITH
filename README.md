@@ -13,7 +13,7 @@ and working style, and takes action on your behalf. Everything runs under the ho
 
 **All numbered slices (0–6) are built, every seam deferred out of them is closed, and the four
 operationalization items — launchd, Guard wiring, menu bar, scheduled refresh — have landed.**
-**410 passed, 2 skipped** (`ruff check edith tests` clean).
+**416 passed, 2 skipped** (`ruff check edith tests` clean).
 
 What remains is **owner live-smoke**, not code. The hardware, GUI and launchd paths cannot be
 exercised headlessly, so nothing below proves EDITH starts under a real launchd session or that
@@ -138,6 +138,13 @@ schedule — and there is no persisted last-run timestamp, so a machine that reb
 daily ~1.3-minute pass rather than a weekly one. Writes are idempotent upserts, so that is wasted
 work, not corruption. It never deep-extracts.
 
+Add `--no-session-narration` if "Hey Edith" stops responding while other Claude Code sessions are
+active. The half-duplex mic gate skips wake detection entirely while EDITH is speaking (plus a
+2.5s cooldown after), and session narration has no cooldown of its own — with several active
+sessions she can talk almost continuously and never hear the wake word. The flag disables session
+narration only; the underlying gate is unchanged, so wake still pauses while EDITH speaks for any
+other reason. Narration is **on by default**.
+
 ### Always-on (launchd)
 
 The daemon above dies with the terminal. To have it start at login and respawn on crash, see
@@ -219,7 +226,7 @@ edith/
 ## Development
 
 ```bash
-pytest                    # 410 passed, 2 skipped
+pytest                    # 416 passed, 2 skipped
 ruff check edith tests    # lint (scoped: scripts/sagemaker has 3 pre-existing SIM115)
 pyright                   # types (basic mode; see the note below)
 ```
