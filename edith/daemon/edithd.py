@@ -32,7 +32,7 @@ import sqlite3
 import subprocess
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -100,7 +100,7 @@ class VoiceIOLike(Protocol):
 class Secrets:
     """The secrets edithd holds in RAM only (never logged, never persisted)."""
 
-    bifrost_api_key: str
+    bifrost_api_key: str = field(repr=False)
     bifrost_base_url: str
 
 
