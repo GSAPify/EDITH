@@ -69,12 +69,21 @@ class Guard:
         self,
         denylist: set[str] | frozenset[str] | None = None,
         *,
+        allowlist: set[str] | frozenset[str] | None = None,
         token_budget: int = _DEFAULT_TOKEN_BUDGET,
         window_seconds: float = _DEFAULT_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._denylist: frozenset[str] = (
             frozenset(denylist) if denylist is not None else _DEFAULT_DENYLIST
+        )
+        # None (the default) = denylist-only, unchanged from before this existed. A caller
+        # with a closed action vocabulary (e.g. desktop control's 4 Intents) passes an
+        # allowlist to flip the default from "allow unless blocked" to "deny unless vetted"
+        # — the correct posture for a finite set, since a denylist can only ever cover verbs
+        # someone thought to add to it.
+        self._allowlist: frozenset[str] | None = (
+            frozenset(allowlist) if allowlist is not None else None
         )
         self._token_budget = token_budget
         self._window_seconds = window_seconds
@@ -87,11 +96,15 @@ class Guard:
     def authorize(self, action: str, *, needs_confirmation: bool = False) -> Decision:
         """Decide whether ``action`` may run. Pure: no side effects.
 
-        Precedence (DENY wins over ASK): a denylisted action is DENY even if it
-        also asks for confirmation; otherwise ``needs_confirmation`` → ASK; else
-        ALLOW. Membership is exact on a normalized action verb, not substring.
+        Precedence (DENY wins over everything): a denylisted action is DENY even if
+        it also asks for confirmation; an allowlist (when set) then denies anything
+        not explicitly on it, confirmation request or not; otherwise
+        ``needs_confirmation`` → ASK; else ALLOW. Membership is exact on a
+        normalized action verb, not substring.
         """
         if action in self._denylist:
+            return Decision.DENY
+        if self._allowlist is not None and action not in self._allowlist:
             return Decision.DENY
         if needs_confirmation:
             return Decision.ASK

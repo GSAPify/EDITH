@@ -25,11 +25,26 @@ import httpx
 
 from edith.bus import EventBus
 from edith.daemon.edithd import EdithDaemon, resolve_secrets
+from edith.desktop import Intent
 from edith.guard import Guard
 from edith.memory.vector import VectorMemoryStore
 from edith.router import Router, Tier
 
 _DEFAULT_DATA_DIR = "~/.edith/data"
+
+
+def _build_guard() -> Guard:
+    """The daemon's ONE Guard, allowlisted to the desktop control vocabulary.
+
+    Guard's denylist (rm_rf, drop_table, …) is a generic blocklist that is disjoint
+    from DesktopControlSkill's four Intents (open_app/spotify/terminal/omc_launch),
+    so without this, ``authorize()`` returns ALLOW for every OS action the daemon
+    can actually take (spec 11 §Completion Record — the gap this closes). The
+    allowlist flips the default: any verb outside the closed desktop vocabulary is
+    denied, so a future Intent added without a deliberate Guard decision fails
+    closed instead of silently open.
+    """
+    return Guard(allowlist=frozenset(intent.value for intent in Intent))
 
 
 def _build_router(client: httpx.AsyncClient, api_key: str, guard: Guard) -> Router:
@@ -81,7 +96,7 @@ async def _amain(
     # ONE Guard for this daemon process, built BEFORE the Router so the ordering makes the
     # sharing structural: the same instance gates+meters the Router and is handed to the
     # daemon for the reasoner / narrator / desktop / Control API seams.
-    guard = Guard()
+    guard = _build_guard()
     router = _build_router(client, secrets.bifrost_api_key, guard)
 
     daemon = EdithDaemon(

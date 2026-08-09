@@ -175,3 +175,20 @@ def test_session_narration_can_be_disabled_from_the_cli() -> None:
         assert seen["session_narration"] is True  # default unchanged
     finally:
         dmain._amain = original
+
+
+def test_daemon_guard_is_allowlisted_to_desktop_intents() -> None:
+    """The composition root's Guard must deny anything outside the desktop vocabulary.
+
+    Guard's denylist alone is disjoint from DesktopControlSkill's four Intents, so a
+    bare Guard() returns ALLOW for every OS action the daemon can take (spec 11 gap).
+    _build_guard's allowlist is what actually closes it.
+    """
+    import edith.daemon.__main__ as dmain
+    from edith.desktop import Intent
+    from edith.guard import Decision
+
+    guard = dmain._build_guard()
+    for intent in Intent:
+        assert guard.authorize(intent.value) is Decision.ALLOW
+    assert guard.authorize("some_future_intent_nobody_vetted") is Decision.DENY
