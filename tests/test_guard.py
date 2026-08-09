@@ -62,6 +62,31 @@ def test_default_denylist_is_nonempty() -> None:
     assert guard.authorize("shutdown") is Decision.DENY
 
 
+def test_no_allowlist_is_unchanged_denylist_only_behaviour() -> None:
+    # allowlist=None (the default) must not change anything about the existing
+    # denylist-only policy — every prior test above pins this at the same time.
+    guard = Guard()
+    assert guard.authorize("anything_not_denylisted") is Decision.ALLOW
+
+
+def test_authorize_denies_action_outside_allowlist() -> None:
+    # A closed vocabulary (e.g. desktop control's 4 Intents) wants the opposite
+    # default from the generic denylist: unknown verbs fail closed, not open.
+    guard = Guard(allowlist={"open_app", "spotify"})
+    assert guard.authorize("some_future_intent") is Decision.DENY
+
+
+def test_authorize_allows_action_inside_allowlist() -> None:
+    guard = Guard(allowlist={"open_app", "spotify"})
+    assert guard.authorize("open_app") is Decision.ALLOW
+
+
+def test_allowlist_does_not_override_denylist() -> None:
+    # DENY still wins even for an action that is (oddly) on both lists.
+    guard = Guard(denylist={"open_app"}, allowlist={"open_app", "spotify"})
+    assert guard.authorize("open_app") is Decision.DENY
+
+
 # --- budget: accumulation + used ------------------------------------------
 
 
