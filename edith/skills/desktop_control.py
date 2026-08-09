@@ -179,12 +179,21 @@ class DesktopControlSkill:
         return await self._speak_result(f"Opening {app}.")
 
     async def _spotify(self, action: DesktopAction) -> SkillResult:
-        rc, _out = await spotify_command(
-            action.spotify_cmd or "",
-            query=action.query,
-            volume=action.volume,
-            runner=self._runner,
-        )
+        # spotify_cmd is unvalidated past the haiku fallback (the regex fast-path can only
+        # ever produce one of the four known commands) — _spotify_script raises ValueError
+        # for anything else, including "play" with no query. That must not escape and kill
+        # the turn.
+        try:
+            rc, _out = await spotify_command(
+                action.spotify_cmd or "",
+                query=action.query,
+                volume=action.volume,
+                runner=self._runner,
+            )
+        except ValueError:
+            return await self._speak_result(
+                "Sorry sir, I didn't understand that Spotify command."
+            )
         if rc != 0:
             return await self._speak_result("Sorry sir, I couldn't reach Spotify.")
         summary = {

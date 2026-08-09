@@ -332,6 +332,36 @@ async def test_skill_haiku_fallback_when_regex_misses() -> None:
     assert router.tiers == [Tier.HAIKU]  # cheapest tier, per spec
 
 
+async def test_skill_spotify_bad_classifier_reply_speaks_correction() -> None:
+    """A haiku reply with an unusable spotify_cmd must not raise out of the turn.
+
+    ``_spotify_script`` raises ValueError for anything other than play/pause/next/volume
+    (and even "play" with no query falls through to that raise). The regex fast-path can
+    only ever produce one of those four, but the haiku fallback echoes back whatever the
+    model returned — nothing here validates it before it reaches the executor.
+    """
+    from edith.router import ModelResponse
+    from edith.skills.desktop_control import DesktopControlSkill
+
+    class _JsonRouter:
+        async def model_call(self, messages, tier_hint, max_tokens=1024):
+            return ModelResponse(text='{"intent": "spotify"}', input_tokens=1, output_tokens=1)
+
+    runner = _RecordingRunner()
+    spoken: list[str] = []
+
+    async def _speak(text: str) -> None:
+        spoken.append(text)
+
+    skill = DesktopControlSkill(runner=runner, router=_JsonRouter(), speak=_speak)
+    result = await skill.run(
+        SkillContext(utterance="do something with spotify", memory=_FakeMemory())
+    )
+    assert runner.calls == []  # never reached the OS
+    assert result.handled is True
+    assert spoken and "didn't understand" in spoken[0].lower()
+
+
 async def test_dispatch_isolation_pr_review_wins_over_desktop() -> None:
     """A pr-review utterance must not be stolen by desktop's broad triggers.
 
