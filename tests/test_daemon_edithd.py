@@ -336,6 +336,14 @@ def test_resolve_secrets_prefers_keyring(monkeypatch):
     assert secrets.bifrost_api_key == "keychain-key"
 
 
+def test_secrets_repr_does_not_expose_the_api_key():
+    # dataclass's default __repr__ prints every field's value -- a bare log/print/f-string
+    # of a Secrets instance (or anything holding one) must not leak the key.
+    secrets = Secrets(bifrost_api_key="super-secret-key", bifrost_base_url="https://x")
+
+    assert "super-secret-key" not in repr(secrets)
+
+
 # --- weekly graph refresh (spec 08 item 4) ---------------------------------------------------
 #
 # The real refresh (ingest_workspace + backfill_embeddings) needs network/`gh` and a real
