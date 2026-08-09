@@ -122,6 +122,25 @@ combination is the 408-passing tree above. Not a design conflict.
   callable defaults to `_deny` and the daemon wires that default, so no such path exists anywhere.
 - `last_commit_date` incremental skip; routing all Kuzu access through `edithd`.
 
+### ⚠ Catch-up since PR #29 (mechanical — not a real session close)
+
+This file was last given a real session update at PR #29 (`docs/state-session20`). Six PRs have
+since merged to `master` without a matching STATE.md entry. Listed here from `git log` only —
+no live-smoke or verification detail is claimed, because none was captured. A real session should
+fold these into the sections above with that detail, then delete this subsection.
+
+| PR | Branch | Commit | What |
+|----|--------|--------|------|
+| #30 | `docs/readme-deemoji` | `ff254ce` | README de-emoji + refresh for #24–#28 |
+| #31 | `fix/menubar-standalone` | `a73ae45` | menu bar stopped importing the daemon; unhangs the suite once `rumps` is installed |
+| #32 | `fix/menubar-visible` | `f69e916` | menu-bar status item actually renders (owner-confirmed visible) |
+| #33 | `docs/spec-14-log-redaction` | `0843fe1` | spec 14 — log-redaction research (no code; recommendation only, see §Known limitations) |
+| #34 | `fix/ingest-error-containment` | `811f240` | `run_ingest` gathers with `return_exceptions=True` + records per-repo, so one failing repo no longer discards the whole run's writes |
+| #35 | `fix/daemon-quiet-flag` | `ef2a7f0` | `--no-session-narration` CLI flag — session narration blinds wake detection with several active Claude Code sessions; default unchanged (narration on) |
+
+PR #36 (`docs/readme-test-count-and-narration-flag`, merged) documented #35's flag in the README
+and fixed the test count it left stale (410 → 416). This STATE.md catch-up is its own follow-up PR.
+
 ---
 
 #### Historical — the four items as they stood before Session 20 (kept for context)
