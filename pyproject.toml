@@ -25,6 +25,20 @@ voice = [
     "sounddevice",
     "numpy",
 ]
+duplex = [
+    # macOS Voice Processing I/O (Apple's echo canceller) is reached through AVAudioEngine,
+    # which needs the PyObjC AVFoundation bindings. Kept OUT of [voice] deliberately: the
+    # duplex backends are still a spike, and the shipping voice path must not grow a
+    # dependency on them. macOS-only by nature.
+    "pyobjc-framework-AVFoundation",
+    "numpy",
+]
+# The software-AEC arm needs no Python package at all: it binds libspeexdsp via ctypes.
+#   brew install speexdsp
+# WebRTC AEC3 was the intended comparison but cannot be built here — the only PyPI package,
+# webrtc-audio-processing==0.1.3, passes -mfloat-abi=hard -mfpu=neon (32-bit ARM flags,
+# rejected by clang on arm64) along with -DWEBRTC_LINUX on macOS, and there is no homebrew
+# formula. Getting a true AEC3 arm means vendoring and patching that build.
 menubar = [
     "rumps",
 ]
