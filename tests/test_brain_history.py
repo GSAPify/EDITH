@@ -1,13 +1,13 @@
 """TurnBuffer — the in-session recent-turns buffer (spec 03 §Conversation memory).
 
-A pure rolling window: add appends, oldest evicts past max_turns, messages()
+A pure rolling window: add appends, oldest evicts past max_messages, messages()
 returns the buffered turns oldest→newest in chat-message shape. No I/O; text is
 stored as-is (redaction is Brain's job upstream).
 """
 
 from __future__ import annotations
 
-from edith.brain.history import TurnBuffer
+from edith.brain.history import DEFAULT_MAX_MESSAGES, TurnBuffer
 
 
 def test_messages_empty_by_default() -> None:
@@ -27,8 +27,8 @@ def test_add_preserves_chronological_order() -> None:
     ]
 
 
-def test_evicts_oldest_past_max_turns() -> None:
-    buf = TurnBuffer(max_turns=2)
+def test_evicts_oldest_past_max_messages() -> None:
+    buf = TurnBuffer(max_messages=2)
     buf.add("user", "a")
     buf.add("assistant", "b")
     buf.add("user", "c")  # evicts "a"
@@ -39,15 +39,36 @@ def test_evicts_oldest_past_max_turns() -> None:
     ]
 
 
-def test_default_max_turns_is_six() -> None:
+def test_default_window_holds_twelve_exchanges() -> None:
+    """The window counts MESSAGES, and add() fires twice per exchange.
+
+    The parameter was called max_turns and defaulted to 6, which reads as six
+    exchanges and delivered three. In a live session the owner referred back to a
+    topic four exchanges old and EDITH had genuinely lost it — she answered that
+    she had no memory of the conversation. This pins the message/exchange ratio so
+    the name can't drift back into lying about it.
+    """
     buf = TurnBuffer()
-    for i in range(8):
-        buf.add("user", f"turn-{i}")
+    for i in range(12):
+        buf.add("user", f"q-{i}")
+        buf.add("assistant", f"a-{i}")
 
     messages = buf.messages()
-    assert len(messages) == 6  # oldest two evicted
-    assert messages[0]["content"] == "turn-2"
-    assert messages[-1]["content"] == "turn-7"
+    assert len(messages) == DEFAULT_MAX_MESSAGES == 24
+    assert messages[0]["content"] == "q-0"  # all 12 exchanges still present
+    assert messages[-1]["content"] == "a-11"
+
+
+def test_thirteenth_exchange_evicts_the_first() -> None:
+    buf = TurnBuffer()
+    for i in range(13):
+        buf.add("user", f"q-{i}")
+        buf.add("assistant", f"a-{i}")
+
+    messages = buf.messages()
+    assert len(messages) == 24
+    assert messages[0]["content"] == "q-1"  # q-0/a-0 evicted
+    assert messages[-1]["content"] == "a-12"
 
 
 def test_text_stored_verbatim() -> None:
