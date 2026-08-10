@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 import os
+import threading
 from typing import Any
 
 from edith.bus import EventBus
@@ -103,16 +104,29 @@ async def run_live_loop(
     wake_threshold: float = _WAKE_THRESHOLD,
     stt_model: str = "small.en",
     followup_seconds: float = _FOLLOWUP_SECONDS,
+    stop: threading.Event | None = None,
 ) -> None:
     """Always-listening loop: mic → (wake | follow-up) → endpointed STT → publish.
 
     Runs the blocking audio loop in a worker thread and bridges each recognised
-    utterance back onto the event loop via ``run_coroutine_threadsafe``. Blocks
-    until cancelled. NOT headless-verified.
+    utterance back onto the event loop via ``run_coroutine_threadsafe``.
+
+    Set *stop* to end the loop cooperatively. ``asyncio.to_thread`` cannot interrupt a
+    worker, and cancelling the task around it does not stop the thread — so without this
+    the mic thread outlived shutdown, still holding an open PortAudio stream, and the
+    interpreter tore down underneath it: Ctrl-C ended in a segfault. Checked once per
+    frame (~80 ms), which is also how long a clean stop takes.
     """
     loop = asyncio.get_running_loop()
     await asyncio.to_thread(
-        _blocking_listen, voice_io, loop, wake_model, wake_threshold, stt_model, followup_seconds
+        _blocking_listen,
+        voice_io,
+        loop,
+        wake_model,
+        wake_threshold,
+        stt_model,
+        followup_seconds,
+        stop,
     )
 
 
@@ -123,8 +137,13 @@ def _blocking_listen(
     wake_threshold: float,
     stt_model: str,
     followup_seconds: float,
+    stop: threading.Event | None = None,
 ) -> None:
-    """The blocking mic loop — runs in a worker thread (heavy imports here)."""
+    """The blocking mic loop — runs in a worker thread (heavy imports here).
+
+    Returns when *stop* is set, which exits the ``RawInputStream`` context and closes
+    the PortAudio stream before the interpreter tears down (see ``run_live_loop``).
+    """
     import numpy as np
     import sounddevice as sd
     from faster_whisper import WhisperModel
@@ -161,7 +180,7 @@ def _blocking_listen(
     with sd.RawInputStream(
         samplerate=_SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME_SAMPLES
     ) as stream:
-        while True:
+        while stop is None or not stop.is_set():
             action, was_speaking = _gate_action(voice_io.is_speaking, was_speaking)
             if action == "skip":
                 _read_frame(np, stream)  # keep draining so the input buffer can't overflow
