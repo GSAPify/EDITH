@@ -25,6 +25,14 @@ voice = [
     "sounddevice",
     "numpy",
 ]
+duplex = [
+    # macOS Voice Processing I/O (Apple's echo canceller) is reached through AVAudioEngine,
+    # which needs the PyObjC AVFoundation bindings. Kept OUT of [voice] deliberately: the
+    # duplex backends are still a spike, and the shipping voice path must not grow a
+    # dependency on them. macOS-only by nature.
+    "pyobjc-framework-AVFoundation",
+    "numpy",
+]
 menubar = [
     "rumps",
 ]
