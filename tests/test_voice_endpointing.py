@@ -197,3 +197,54 @@ def test_trailing_silence_resets_on_resumed_speech() -> None:
         "silence counter was not reset by the resumed-speech frame"
     )
     assert ep.feed(_QUIET) is True, "did not end after full silence window post-resume"
+
+
+def test_capture_prepends_preroll_so_a_quiet_word_onset_is_not_clipped() -> None:
+    """The trigger frame is not the frame speech began on.
+
+    A word ramps up over 100-300 ms, so its opening consonants sit below the threshold
+    and were never in the buffer at all — the owner reported EDITH "will not pick up the
+    first two parts of my sentence". Lowering the threshold cannot recover audio that was
+    already discarded; only keeping it can.
+    """
+    import numpy as np
+
+    from edith.voice.live import _capture_endpointed
+
+    loud = np.full(1280, 3000, dtype=np.int16)
+    quiet = np.full(1280, 120, dtype=np.int16)  # the sub-threshold onset
+    silence = np.zeros(1280, dtype=np.int16)
+
+    class Stream:
+        def __init__(self) -> None:
+            self._frames = [loud] + [silence] * 20
+
+        def read(self, _n: int):  # noqa: ANN202 — mirrors sounddevice's tuple return
+            frame = self._frames.pop(0) if self._frames else silence
+            return frame.tobytes(), False
+
+    endpointer = Endpointer(silence_ms=160.0, hard_max_ms=5000.0, threshold=500.0, frame_ms=80.0)
+    pcm = _capture_endpointed(np, Stream(), endpointer, loud, preroll=(quiet, quiet))
+
+    # the two quiet onset frames survive, ahead of the trigger frame
+    assert len(pcm) >= 1280 * 3
+    assert int(pcm[0]) == 120
+    assert int(pcm[1280]) == 120
+    assert int(pcm[2560]) == 3000
+
+
+def test_capture_without_preroll_is_unchanged() -> None:
+    import numpy as np
+
+    from edith.voice.live import _capture_endpointed
+
+    loud = np.full(1280, 3000, dtype=np.int16)
+    silence = np.zeros(1280, dtype=np.int16)
+
+    class Stream:
+        def read(self, _n: int):  # noqa: ANN202
+            return silence.tobytes(), False
+
+    endpointer = Endpointer(silence_ms=160.0, hard_max_ms=5000.0, threshold=500.0, frame_ms=80.0)
+    pcm = _capture_endpointed(np, Stream(), endpointer, loud)
+    assert int(pcm[0]) == 3000
