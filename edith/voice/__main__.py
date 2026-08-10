@@ -27,7 +27,7 @@ import httpx
 from edith.brain.history import TurnBuffer
 from edith.bus import Event, EventBus
 from edith.memory.secrets import sanitize_text
-from edith.router import Router, Tier
+from edith.router import Router, Tier, resolve_models
 from edith.voice.io import VoiceIO
 from edith.voice.live import (
     build_live_voice_io,
@@ -77,13 +77,8 @@ def _build_router() -> Router | None:
     key = os.environ.get("BIFROST_API_KEY")
     if not base or not key:
         return None
-    models = {
-        Tier.HAIKU: os.environ.get("BIFROST_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
-        Tier.SONNET: os.environ.get("BIFROST_MODEL_SONNET", "claude-sonnet-4-6"),
-        Tier.OPUS: os.environ.get("BIFROST_MODEL_OPUS", "claude-opus-4-8"),
-    }
     client = httpx.AsyncClient(base_url=base, timeout=30.0)
-    return Router(client, key, models)
+    return Router(client, key, resolve_models())
 
 
 async def _amain(engine: str) -> int:
