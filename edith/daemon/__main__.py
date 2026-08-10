@@ -181,7 +181,23 @@ def main(argv: list[str] | None = None) -> int:
             "in a dedicated terminal, not in the LaunchAgent."
         ),
     )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "probe every capability the daemon needs (mic, wake model, speech, gateway, "
+            "Apple Events), print what is missing, and exit. Touching each one provokes "
+            "the macOS permission prompt here, where you expect it, instead of mid-"
+            "conversation where a denied prompt just looks like a broken feature."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.preflight:
+        from edith.daemon.preflight import render, run_all
+
+        checks = run_all()
+        print(render(checks), end="")
+        return 0 if all(c.ok for c in checks) else 1
     try:
         return asyncio.run(
             _amain(
