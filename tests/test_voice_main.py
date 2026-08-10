@@ -34,7 +34,7 @@ def test_build_messages_splices_prior_turns_between_system_and_utterance() -> No
 
 
 def test_build_messages_respects_buffer_cap() -> None:
-    history = TurnBuffer(max_turns=2)
+    history = TurnBuffer(max_messages=2)
     for i in range(4):
         history.add("user", f"turn {i}")
     msgs = build_messages("P", history, "now")

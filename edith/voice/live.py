@@ -25,6 +25,9 @@ import asyncio
 import logging
 import math
 import os
+import threading
+from collections import deque
+from collections.abc import Sequence
 from typing import Any
 
 from edith.bus import EventBus
@@ -48,6 +51,9 @@ _FOLLOWUP_SECONDS = 10.0  # mic stays hot this long after a reply (follow-up, no
 _ENDPOINT_SILENCE_MS = 800.0
 _ENDPOINT_MAX_MS = 15000.0
 _ENDPOINT_THRESHOLD = 500.0  # RMS onset/silence threshold — CALIBRATE via EDITH_VOICE_DEBUG
+# Frames retained before a trigger so a word's quiet onset is not clipped. 4 x 80 ms = 320 ms,
+# comfortably longer than the 100-300 ms a word takes to ramp past the threshold.
+_PREROLL_FRAMES = 4
 
 
 def resolve_wake_model() -> str:
@@ -103,16 +109,29 @@ async def run_live_loop(
     wake_threshold: float = _WAKE_THRESHOLD,
     stt_model: str = "small.en",
     followup_seconds: float = _FOLLOWUP_SECONDS,
+    stop: threading.Event | None = None,
 ) -> None:
     """Always-listening loop: mic → (wake | follow-up) → endpointed STT → publish.
 
     Runs the blocking audio loop in a worker thread and bridges each recognised
-    utterance back onto the event loop via ``run_coroutine_threadsafe``. Blocks
-    until cancelled. NOT headless-verified.
+    utterance back onto the event loop via ``run_coroutine_threadsafe``.
+
+    Set *stop* to end the loop cooperatively. ``asyncio.to_thread`` cannot interrupt a
+    worker, and cancelling the task around it does not stop the thread — so without this
+    the mic thread outlived shutdown, still holding an open PortAudio stream, and the
+    interpreter tore down underneath it: Ctrl-C ended in a segfault. Checked once per
+    frame (~80 ms), which is also how long a clean stop takes.
     """
     loop = asyncio.get_running_loop()
     await asyncio.to_thread(
-        _blocking_listen, voice_io, loop, wake_model, wake_threshold, stt_model, followup_seconds
+        _blocking_listen,
+        voice_io,
+        loop,
+        wake_model,
+        wake_threshold,
+        stt_model,
+        followup_seconds,
+        stop,
     )
 
 
@@ -123,8 +142,13 @@ def _blocking_listen(
     wake_threshold: float,
     stt_model: str,
     followup_seconds: float,
+    stop: threading.Event | None = None,
 ) -> None:
-    """The blocking mic loop — runs in a worker thread (heavy imports here)."""
+    """The blocking mic loop — runs in a worker thread (heavy imports here).
+
+    Returns when *stop* is set, which exits the ``RawInputStream`` context and closes
+    the PortAudio stream before the interpreter tears down (see ``run_live_loop``).
+    """
     import numpy as np
     import sounddevice as sd
     from faster_whisper import WhisperModel
@@ -152,6 +176,10 @@ def _blocking_listen(
         threshold=endpoint_threshold,
         frame_ms=_FRAME_SAMPLES / _SAMPLE_RATE * 1000.0,
     )
+    # Pre-roll ring: the last few frames before a trigger, so a word's opening consonants
+    # (which ramp up below the threshold) are not lost. See _capture_endpointed.
+    preroll_frames = int(os.environ.get("EDITH_PREROLL_FRAMES", str(_PREROLL_FRAMES)))
+    preroll: deque[Any] = deque(maxlen=max(0, preroll_frames))
     was_speaking = False
     # Only a reply to a REAL captured utterance opens the follow-up window — the
     # startup greeting (and any unsolicited speak) must NOT arm wake-free capture,
@@ -161,7 +189,7 @@ def _blocking_listen(
     with sd.RawInputStream(
         samplerate=_SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME_SAMPLES
     ) as stream:
-        while True:
+        while stop is None or not stop.is_set():
             action, was_speaking = _gate_action(voice_io.is_speaking, was_speaking)
             if action == "skip":
                 _read_frame(np, stream)  # keep draining so the input buffer can't overflow
@@ -204,11 +232,15 @@ def _blocking_listen(
             else:
                 triggered = float(score) >= wake_threshold
             if not triggered:
+                preroll.append(frame)  # keep the quiet run-up available for the next trigger
                 continue
 
             window.on_utterance()  # a real utterance is starting → keep the window hot
             # Capture until trailing silence (endpointed), transcribe, hand to VoiceIO.
-            pcm = _capture_endpointed(np, stream, endpointer, frame)
+            # The pre-roll supplies the frames BEFORE the trigger, where a word's opening
+            # consonants live — they ramp up below the threshold and were being lost.
+            pcm = _capture_endpointed(np, stream, endpointer, frame, tuple(preroll))
+            preroll.clear()  # consumed — must not leak into the next utterance
             audio = pcm.astype(np.float32) / 32768.0
             segments, _info = stt.transcribe(audio, vad_filter=True)
             seg_list = list(segments)
@@ -260,17 +292,33 @@ def _frame_rms(np: Any, frame: Any) -> float:
     return float(np.sqrt(np.mean(np.square(frame.astype(np.float32)))))
 
 
-def _capture_endpointed(np: Any, stream: Any, endpointer: Endpointer, first_frame: Any) -> Any:
+def _capture_endpointed(
+    np: Any,
+    stream: Any,
+    endpointer: Endpointer,
+    first_frame: Any,
+    preroll: Sequence[Any] = (),
+) -> Any:
     """Read frames until the endpointer says the utterance ended (trailing silence / hard max).
 
-    Starts from ``first_frame`` (the onset frame that triggered capture) so no speech is
-    clipped, then feeds each frame's RMS to the pure ``Endpointer``. Owner-smoke only; the
-    end-decision logic is unit-tested in test_voice_endpointing.py.
+    Starts from *preroll* + ``first_frame``, then feeds each frame's RMS to the pure
+    ``Endpointer``. Owner-smoke only; the end-decision logic is unit-tested in
+    test_voice_endpointing.py.
+
+    **Why the pre-roll.** ``first_frame`` is the frame that *crossed the trigger*, not the
+    frame speech began on. A word ramps up over 100-300 ms, so its opening consonants sit
+    below the threshold and were simply never in the buffer — the owner reported EDITH
+    "will not pick up the first two parts of my sentence", and lowering the threshold
+    cannot fix it because the audio was already gone. The loop keeps the last few frames
+    in a ring buffer and hands them over here, so capture starts *before* the trigger.
     """
     endpointer.reset()
-    chunks = [first_frame]
-    if endpointer.feed(_frame_rms(np, first_frame)):
-        return np.concatenate(chunks)
+    chunks = [*preroll, first_frame]
+    for frame in chunks:
+        # Leading sub-threshold frames do not count toward trailing silence (Endpointer
+        # only starts that counter after speech), so feeding the pre-roll is safe.
+        if endpointer.feed(_frame_rms(np, frame)):
+            return np.concatenate(chunks)
     while True:
         frame = _read_frame(np, stream)
         chunks.append(frame)

@@ -182,3 +182,35 @@ async def test_history_none_default_leaves_first_call_unchanged():
     assert [m["role"] for m in second_messages] == ["system", "user"]
     second_blob = " ".join(str(m.get("content", "")) for m in second_messages)
     assert "turn one" not in second_blob
+
+
+def test_recalled_facts_ride_the_user_turn_not_the_cached_preamble() -> None:
+    """Facts are the most volatile part of the prompt; the preamble is the cache breakpoint.
+
+    Folding per-turn recall into the system preamble changed the cached bytes on every
+    turn — a guaranteed prompt-cache miss that paid the write premium forever and never
+    read. Keeping the preamble byte-stable is what makes the breakpoint worth having.
+    """
+    from edith.brain.loop import _assemble
+
+    messages = _assemble(
+        "what did we decide?",
+        [{"text": "Concode migrates to LangChain XML"}, {"text": "owner prefers tiny diffs"}],
+        "PERSONA",
+    )
+
+    assert messages[0] == {"role": "system", "content": "PERSONA"}  # byte-stable
+    user = messages[1]["content"]
+    assert "Concode migrates to LangChain XML" in user
+    assert "owner prefers tiny diffs" in user
+    assert user.endswith("what did we decide?")
+
+
+def test_assemble_without_recall_leaves_the_utterance_bare() -> None:
+    from edith.brain.loop import _assemble
+
+    messages = _assemble("hello", [], "PERSONA")
+    assert messages == [
+        {"role": "system", "content": "PERSONA"},
+        {"role": "user", "content": "hello"},
+    ]

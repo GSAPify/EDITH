@@ -81,6 +81,10 @@ _GRAPH_REFRESH_ERRORS: tuple[type[Exception], ...] = (
 # task does not stop that thread — see _graph_refresh_loop). A little over the measured
 # ~1.3-min full pass.
 _GRAPH_REFRESH_SHUTDOWN_JOIN_TIMEOUT = 120.0
+# The mic loop checks its stop flag once per ~80 ms frame, so a clean exit is fast. The
+# bound exists for a wedged audio read: past it, shutdown falls back to the old
+# best-effort cancel rather than hanging.
+_VOICE_SHUTDOWN_JOIN_TIMEOUT = 3.0
 
 
 class VoiceIOLike(Protocol):
@@ -206,6 +210,7 @@ class EdithDaemon:
         self._session_bus: SessionBus | None = None
         self._session_tasks: list[asyncio.Task[None]] = []
         self._voice_task: asyncio.Task[None] | None = None
+        self._voice_stop: threading.Event | None = None
         self._stopped = asyncio.Event()
 
     @property
@@ -361,10 +366,31 @@ class EdithDaemon:
         cancelling this task does NOT stop the thread (``RawInputStream.read`` runs
         until process exit) — clean teardown is process exit, per the Completion Record.
         """
-        from edith.voice.live import run_live_loop  # optional dep — voice path only
+        # optional dep — voice path only
+        from edith.voice.live import resolve_wake_model, run_live_loop, wake_phrase
+
+        # Resolve the wake model HERE, exactly as edith.voice.__main__ does. Calling
+        # run_live_loop(voice) bare takes its _WAKE_MODEL default ("hey_jarvis"), which
+        # silently ignored EDITH_WAKE_MODEL — so the daemon listened for "Hey Jarvis"
+        # while the owner said "Hey Edith" and the trained hey_edith.onnx was never
+        # loaded. Wake scored ~0.00 forever with no error anywhere.
+        wake_model = resolve_wake_model()
+        wake_threshold = float(os.environ.get("EDITH_WAKE_THRESHOLD", "0.5"))
+        followup = float(os.environ.get("EDITH_FOLLOWUP_SECONDS", "10.0"))
+        print(f"[edithd] wake model: {wake_model}  (threshold {wake_threshold}) — "
+              f"say '{wake_phrase(wake_model)}, …'", flush=True)
 
         loop = asyncio.get_running_loop()
-        self._voice_task = loop.create_task(run_live_loop(voice))  # type: ignore[arg-type]
+        self._voice_stop = threading.Event()
+        self._voice_task = loop.create_task(
+            run_live_loop(  # type: ignore[arg-type]
+                voice,
+                wake_model=wake_model,
+                wake_threshold=wake_threshold,
+                followup_seconds=followup,
+                stop=self._voice_stop,
+            )
+        )
 
     def _make_default_resolver(self, store: MemoryStore) -> ResolveRepoLike:
         """A ``resolve_repo``-shaped closure bound to this daemon's store+router.
@@ -546,11 +572,21 @@ class EdithDaemon:
         for task in self._session_tasks:
             task.cancel()
         self._session_tasks = []
-        # Cancel the live-voice task (best-effort: the blocking mic thread behind
-        # asyncio.to_thread keeps running until process exit — see _start_voice_loop).
+        # Stop the live-voice loop COOPERATIVELY, then join it. asyncio.to_thread cannot
+        # interrupt a worker and cancelling the task around it does not stop the thread, so
+        # this used to leave the mic thread running past shutdown with an open PortAudio
+        # stream — the interpreter then tore down underneath it and Ctrl-C ended in a
+        # segfault. Setting the flag lets the loop exit its RawInputStream context and close
+        # the device first. It checks once per ~80 ms frame; the join is bounded so a wedged
+        # audio read degrades to the old best-effort behaviour instead of hanging shutdown.
         if self._voice_task is not None:
-            self._voice_task.cancel()
-            self._voice_task = None
+            voice_task, self._voice_task = self._voice_task, None
+            if self._voice_stop is not None:
+                self._voice_stop.set()
+            try:
+                await asyncio.wait_for(voice_task, _VOICE_SHUTDOWN_JOIN_TIMEOUT)
+            except (TimeoutError, asyncio.CancelledError):
+                voice_task.cancel()
         # Cancel the graph-refresh loop (spec 08 item 4): stops it from starting another
         # cycle. This does NOT stop an already-running worker thread (asyncio.to_thread
         # can't interrupt one) — join it below, BEFORE compact()/close() touch the same

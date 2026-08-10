@@ -16,6 +16,7 @@ opus job (``think_async``, deferred to a follow-up). An *explicit* ``OPUS`` hint
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 
@@ -111,3 +112,33 @@ def resolve_tier(
         # work is flagged for a background opus job (think_async — deferred follow-up).
         return TierDecision(Tier.SONNET, suggest_background=True)
     return TierDecision(Tier.SONNET)
+
+
+# Tier → Bifrost model id. ONE map, read by every entry point.
+#
+# Previously duplicated in edith/daemon/__main__.py and edith/voice/__main__.py, with a
+# TODO(config) flagging the drift risk — which then bit: the two entry points had to be
+# updated in lockstep on every model bump, and nothing enforced it. Env vars still override
+# per tier, so a model can be pinned without a code change.
+#
+# Model ids carry NO date suffix: `claude-opus-5`, not `claude-opus-5-20260401`. The
+# gateway resolves the alias to whatever dated snapshot is current.
+_DEFAULT_MODELS: dict[Tier, str] = {
+    Tier.HAIKU: "claude-haiku-4-5",
+    Tier.SONNET: "claude-sonnet-5",  # the live talking voice — every conversational turn
+    Tier.OPUS: "claude-opus-5",  # explicit depth + background reasoning
+}
+
+_MODEL_ENV_VARS: dict[Tier, str] = {
+    Tier.HAIKU: "BIFROST_MODEL_HAIKU",
+    Tier.SONNET: "BIFROST_MODEL_SONNET",
+    Tier.OPUS: "BIFROST_MODEL_OPUS",
+}
+
+
+def resolve_models() -> dict[Tier, str]:
+    """The tier→model map, with per-tier ``BIFROST_MODEL_*`` env overrides applied."""
+    return {
+        tier: os.environ.get(_MODEL_ENV_VARS[tier], default)
+        for tier, default in _DEFAULT_MODELS.items()
+    }

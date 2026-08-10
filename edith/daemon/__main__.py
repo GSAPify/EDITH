@@ -28,7 +28,7 @@ from edith.daemon.edithd import EdithDaemon, resolve_secrets
 from edith.desktop import Intent
 from edith.guard import Guard
 from edith.memory.vector import VectorMemoryStore
-from edith.router import Router, Tier
+from edith.router import Router, resolve_models
 
 _DEFAULT_DATA_DIR = "~/.edith/data"
 
@@ -48,14 +48,9 @@ def _build_guard() -> Guard:
 
 
 def _build_router(client: httpx.AsyncClient, api_key: str, guard: Guard) -> Router:
-    # NOTE: Bifrost model ids are duplicated from edith.voice.__main__ — a drift risk
-    # (owner guardrail on stale hardcoded constants). TODO(config): centralize a
-    # tier→model map both entry points read.
-    models = {
-        Tier.HAIKU: os.environ.get("BIFROST_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
-        Tier.SONNET: os.environ.get("BIFROST_MODEL_SONNET", "claude-sonnet-4-6"),
-        Tier.OPUS: os.environ.get("BIFROST_MODEL_OPUS", "claude-opus-4-8"),
-    }
+    # ONE tier→model map, shared with edith.voice.__main__ (closes the TODO(config) drift
+    # risk that used to live here — the two entry points had to be bumped in lockstep).
+    models = resolve_models()
     # Guard's two Router touchpoints (spec 11): gate the tier before the call, charge the
     # window after it. ``on_usage`` is what makes ``budget_used`` move at all — without it
     # the budget is theatre.
@@ -186,7 +181,23 @@ def main(argv: list[str] | None = None) -> int:
             "in a dedicated terminal, not in the LaunchAgent."
         ),
     )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "probe every capability the daemon needs (mic, wake model, speech, gateway, "
+            "Apple Events), print what is missing, and exit. Touching each one provokes "
+            "the macOS permission prompt here, where you expect it, instead of mid-"
+            "conversation where a denied prompt just looks like a broken feature."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.preflight:
+        from edith.daemon.preflight import render, run_all
+
+        checks = run_all()
+        print(render(checks), end="")
+        return 0 if all(c.ok for c in checks) else 1
     try:
         return asyncio.run(
             _amain(

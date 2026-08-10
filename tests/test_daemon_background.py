@@ -241,3 +241,97 @@ def test_daemon_guard_is_allowlisted_to_desktop_intents() -> None:
     for intent in Intent:
         assert guard.authorize(intent.value) is Decision.ALLOW
     assert guard.authorize("some_future_intent_nobody_vetted") is Decision.DENY
+
+
+async def test_daemon_voice_loop_honors_edith_wake_model(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daemon must resolve EDITH_WAKE_MODEL, not take run_live_loop's default.
+
+    _start_voice_loop called run_live_loop(voice) bare, so it took the wake_model
+    default of "hey_jarvis" and EDITH_WAKE_MODEL was silently ignored: the daemon
+    listened for "Hey Jarvis" while the owner said "Hey Edith", the trained
+    hey_edith.onnx was never loaded, and wake scored ~0.00 with no error logged
+    anywhere. The voice-only entry point (edith.voice.__main__) resolved it
+    correctly, which is why voice-only worked and the full daemon did not.
+    """
+    import edith.voice.live as live
+
+    seen: dict[str, object] = {}
+
+    async def fake_run_live_loop(voice_io, **kwargs):  # noqa: ANN001, ANN003
+        seen.update(kwargs)
+
+    monkeypatch.setattr(live, "run_live_loop", fake_run_live_loop)
+    monkeypatch.setenv("EDITH_WAKE_MODEL", "/models/hey_edith.onnx")
+    monkeypatch.setenv("EDITH_WAKE_THRESHOLD", "0.42")
+
+    daemon = _daemon(data_dir, voice=FakeVoiceIO())
+    daemon._start_voice_loop(FakeVoiceIO())
+    assert daemon._voice_task is not None
+    await daemon._voice_task
+
+    assert seen["wake_model"] == "/models/hey_edith.onnx"  # not "hey_jarvis"
+    assert seen["wake_threshold"] == 0.42
+
+
+async def test_daemon_voice_loop_falls_back_to_bundled_default(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no EDITH_WAKE_MODEL, the bundled hey_jarvis default still applies."""
+    import edith.voice.live as live
+
+    seen: dict[str, object] = {}
+
+    async def fake_run_live_loop(voice_io, **kwargs):  # noqa: ANN001, ANN003
+        seen.update(kwargs)
+
+    monkeypatch.setattr(live, "run_live_loop", fake_run_live_loop)
+    monkeypatch.delenv("EDITH_WAKE_MODEL", raising=False)
+    monkeypatch.delenv("EDITH_WAKE_THRESHOLD", raising=False)
+
+    daemon = _daemon(data_dir, voice=FakeVoiceIO())
+    daemon._start_voice_loop(FakeVoiceIO())
+    assert daemon._voice_task is not None
+    await daemon._voice_task
+
+    assert seen["wake_model"] == "hey_jarvis"
+    assert seen["wake_threshold"] == 0.5
+
+
+async def test_stop_sets_the_voice_stop_flag_and_joins_the_thread(data_dir: Path) -> None:
+    """The mic loop must be stopped cooperatively, not just cancelled.
+
+    asyncio.to_thread cannot interrupt a worker and cancelling the task around it does
+    not stop the thread, so the mic thread used to outlive shutdown holding an open
+    PortAudio stream — the interpreter then tore down underneath it and Ctrl-C ended in
+    a segfault. stop() must set the flag and await the loop's own exit.
+    """
+    import threading
+
+    import edith.voice.live as live
+
+    started = threading.Event()
+    observed_stop: dict[str, threading.Event] = {}
+
+    async def fake_run_live_loop(voice_io, **kwargs):  # noqa: ANN001, ANN003
+        stop = kwargs["stop"]
+        observed_stop["flag"] = stop
+        started.set()
+        while not stop.is_set():  # mirrors the real loop's exit condition
+            await asyncio.sleep(0.01)
+
+    original = live.run_live_loop
+    live.run_live_loop = fake_run_live_loop
+    try:
+        daemon = _daemon(data_dir, voice=FakeVoiceIO())
+        daemon._start_voice_loop(FakeVoiceIO())
+        await asyncio.wait_for(asyncio.to_thread(started.wait, 2.0), 3.0)
+        assert not observed_stop["flag"].is_set()
+
+        await daemon.stop()
+
+        assert observed_stop["flag"].is_set(), "stop() must signal the mic loop"
+        assert daemon._voice_task is None
+    finally:
+        live.run_live_loop = original
