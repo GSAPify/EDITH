@@ -361,10 +361,29 @@ class EdithDaemon:
         cancelling this task does NOT stop the thread (``RawInputStream.read`` runs
         until process exit) — clean teardown is process exit, per the Completion Record.
         """
-        from edith.voice.live import run_live_loop  # optional dep — voice path only
+        # optional dep — voice path only
+        from edith.voice.live import resolve_wake_model, run_live_loop, wake_phrase
+
+        # Resolve the wake model HERE, exactly as edith.voice.__main__ does. Calling
+        # run_live_loop(voice) bare takes its _WAKE_MODEL default ("hey_jarvis"), which
+        # silently ignored EDITH_WAKE_MODEL — so the daemon listened for "Hey Jarvis"
+        # while the owner said "Hey Edith" and the trained hey_edith.onnx was never
+        # loaded. Wake scored ~0.00 forever with no error anywhere.
+        wake_model = resolve_wake_model()
+        wake_threshold = float(os.environ.get("EDITH_WAKE_THRESHOLD", "0.5"))
+        followup = float(os.environ.get("EDITH_FOLLOWUP_SECONDS", "10.0"))
+        print(f"[edithd] wake model: {wake_model}  (threshold {wake_threshold}) — "
+              f"say '{wake_phrase(wake_model)}, …'", flush=True)
 
         loop = asyncio.get_running_loop()
-        self._voice_task = loop.create_task(run_live_loop(voice))  # type: ignore[arg-type]
+        self._voice_task = loop.create_task(
+            run_live_loop(  # type: ignore[arg-type]
+                voice,
+                wake_model=wake_model,
+                wake_threshold=wake_threshold,
+                followup_seconds=followup,
+            )
+        )
 
     def _make_default_resolver(self, store: MemoryStore) -> ResolveRepoLike:
         """A ``resolve_repo``-shaped closure bound to this daemon's store+router.
