@@ -33,6 +33,12 @@ duplex = [
     "pyobjc-framework-AVFoundation",
     "numpy",
 ]
+# The software-AEC arm needs no Python package at all: it binds libspeexdsp via ctypes.
+#   brew install speexdsp
+# WebRTC AEC3 was the intended comparison but cannot be built here — the only PyPI package,
+# webrtc-audio-processing==0.1.3, passes -mfloat-abi=hard -mfpu=neon (32-bit ARM flags,
+# rejected by clang on arm64) along with -DWEBRTC_LINUX on macOS, and there is no homebrew
+# formula. Getting a true AEC3 arm means vendoring and patching that build.
 menubar = [
     "rumps",
 ]
