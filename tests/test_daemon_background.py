@@ -297,3 +297,41 @@ async def test_daemon_voice_loop_falls_back_to_bundled_default(
 
     assert seen["wake_model"] == "hey_jarvis"
     assert seen["wake_threshold"] == 0.5
+
+
+async def test_stop_sets_the_voice_stop_flag_and_joins_the_thread(data_dir: Path) -> None:
+    """The mic loop must be stopped cooperatively, not just cancelled.
+
+    asyncio.to_thread cannot interrupt a worker and cancelling the task around it does
+    not stop the thread, so the mic thread used to outlive shutdown holding an open
+    PortAudio stream — the interpreter then tore down underneath it and Ctrl-C ended in
+    a segfault. stop() must set the flag and await the loop's own exit.
+    """
+    import threading
+
+    import edith.voice.live as live
+
+    started = threading.Event()
+    observed_stop: dict[str, threading.Event] = {}
+
+    async def fake_run_live_loop(voice_io, **kwargs):  # noqa: ANN001, ANN003
+        stop = kwargs["stop"]
+        observed_stop["flag"] = stop
+        started.set()
+        while not stop.is_set():  # mirrors the real loop's exit condition
+            await asyncio.sleep(0.01)
+
+    original = live.run_live_loop
+    live.run_live_loop = fake_run_live_loop
+    try:
+        daemon = _daemon(data_dir, voice=FakeVoiceIO())
+        daemon._start_voice_loop(FakeVoiceIO())
+        await asyncio.wait_for(asyncio.to_thread(started.wait, 2.0), 3.0)
+        assert not observed_stop["flag"].is_set()
+
+        await daemon.stop()
+
+        assert observed_stop["flag"].is_set(), "stop() must signal the mic loop"
+        assert daemon._voice_task is None
+    finally:
+        live.run_live_loop = original
