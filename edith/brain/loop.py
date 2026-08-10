@@ -416,16 +416,22 @@ def _assemble(
     recalled: list[dict[str, object]],
     system_preamble: str = _SYSTEM_PREAMBLE,
 ) -> list[dict[str, object]]:
-    """Working context = system preamble + recalled facts + the utterance."""
+    """Working context = system preamble + recalled facts + the utterance.
+
+    Recalled facts ride the USER turn, not the system preamble. They are the most
+    volatile thing in the prompt — a different recall on every turn — and the system
+    preamble is the prompt-cache breakpoint (``bifrost._split_system``). Caching is a
+    prefix match, so folding per-turn facts into the preamble changed the cached bytes
+    on every single turn: a guaranteed miss, paying the write premium forever and never
+    reading. Keeping the preamble byte-stable is what makes the breakpoint worth having.
+    """
     facts = "\n".join(
         f"- {hit.get('text')}" for hit in recalled if hit.get("text")
     )
-    system = system_preamble
-    if facts:
-        system += "\n\nRecalled facts:\n" + facts
+    user_content = f"Recalled facts:\n{facts}\n\n{utterance}" if facts else utterance
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": utterance},
+        {"role": "system", "content": system_preamble},
+        {"role": "user", "content": user_content},
     ]
 
 

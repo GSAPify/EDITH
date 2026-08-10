@@ -62,12 +62,31 @@ class ModelResponse:
         input_tokens: int,
         output_tokens: int,
         budget_limited: bool = False,
+        cache_creation_tokens: int = 0,
+        cache_read_tokens: int = 0,
     ) -> None:
         self.text = text
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         # True when opus was wanted but the budget gate denied it → fell back to sonnet.
         self.budget_limited = budget_limited
+        # Prompt-cache accounting. The gateway reports a cached prefix under these two
+        # fields INSTEAD of input_tokens, so they must be charged too — see
+        # ``billable_input_tokens``.
+        self.cache_creation_tokens = cache_creation_tokens
+        self.cache_read_tokens = cache_read_tokens
+
+    @property
+    def billable_input_tokens(self) -> int:
+        """Every input token the turn consumed, cached or not — what Guard must charge.
+
+        ``input_tokens`` is only the UNCACHED remainder. Once a prompt-cache breakpoint
+        is in play the bulk of the prefix is reported under ``cache_creation_input_tokens``
+        or ``cache_read_input_tokens``, so charging ``input_tokens`` alone silently
+        under-meters the window: a 4 800-token preamble read from cache bills Guard for
+        14. That would quietly break the guarantee the budget exists to provide.
+        """
+        return self.input_tokens + self.cache_creation_tokens + self.cache_read_tokens
 
 
 class ModelChunk:
@@ -125,7 +144,8 @@ class Router:
         data = await self._post_messages(self._models[decision.tier], safe, max_tokens)
         response = _parse_response(data)
         response.budget_limited = decision.budget_limited
-        self._on_usage(response.input_tokens, response.output_tokens)
+        # Cached prefix tokens are charged too — see ModelResponse.billable_input_tokens.
+        self._on_usage(response.billable_input_tokens, response.output_tokens)
         return response
 
     async def model_call_stream(
@@ -149,7 +169,7 @@ class Router:
         body = {
             "model": self._models[decision.tier],
             "max_tokens": max_tokens,
-            "messages": safe,
+            **_split_system(safe),
             "stream": True,
         }
         usage: dict[str, object] = {}
@@ -170,7 +190,14 @@ class Router:
         # Charge the stream. A field the gateway omits reads as 0 rather than being
         # guessed at. A caller that abandons the generator mid-stream never reaches
         # here and is therefore not charged (``model_call_masked``'s pump always drains).
-        self._on_usage(_int_of(usage, "input_tokens"), _int_of(usage, "output_tokens"))
+        self._on_usage(
+            # Cached prefix tokens are reported INSTEAD of input_tokens — charge all three
+            # or the budget window silently under-meters (see billable_input_tokens).
+            _int_of(usage, "input_tokens")
+            + _int_of(usage, "cache_creation_input_tokens")
+            + _int_of(usage, "cache_read_input_tokens"),
+            _int_of(usage, "output_tokens"),
+        )
         yield ModelChunk(token="", is_final=True, usage=usage)
 
     async def model_call_masked(
@@ -261,10 +288,48 @@ class Router:
         response = await self._client.post(
             "v1/messages",
             headers=self._headers(),
-            json={"model": model, "max_tokens": max_tokens, "messages": messages},
+            json={"model": model, "max_tokens": max_tokens, **_split_system(messages)},
         )
         response.raise_for_status()
         return response.json()
+
+
+def _split_system(
+    messages: list[dict[str, object]],
+) -> dict[str, object]:
+    """Hoist a leading ``role: "system"`` message into the top-level ``system`` field,
+    marked as a prompt-cache breakpoint.
+
+    Two things are wrong with sending the preamble as ``messages[0]``. It is not the
+    shape the Messages API documents — ``system`` is a top-level field, and a
+    ``role: "system"`` entry at index 0 is rejected outright by some models (the
+    gateway was quietly normalizing it for us). And it cannot carry ``cache_control``,
+    so the preamble was re-billed at full input price on every single turn.
+
+    ``cache_control`` here is free when it does nothing: a prefix below the model's
+    minimum (512 tokens on opus-5, 1024 on sonnet-5) simply is not cached — no error,
+    no write premium, ``cache_creation_input_tokens: 0``. So this is safe to apply
+    unconditionally and starts paying by itself once a preamble grows past the
+    threshold, rather than needing someone to remember to switch it on.
+
+    Only a *leading* system message is hoisted; anything else is passed through
+    untouched, so a mid-conversation system turn keeps its position.
+    """
+    if not messages or messages[0].get("role") != "system":
+        return {"messages": messages}
+    content = messages[0].get("content")
+    if not isinstance(content, str) or not content:
+        return {"messages": messages}
+    return {
+        "system": [
+            {
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "messages": messages[1:],
+    }
 
 
 def _parse_response(data: dict[str, object]) -> ModelResponse:
@@ -274,10 +339,15 @@ def _parse_response(data: dict[str, object]) -> ModelResponse:
         first = content[0]
         if isinstance(first, dict):
             text = str(first.get("text", ""))
-    usage = data.get("usage") or {}
-    input_tokens = int(usage.get("input_tokens", 0)) if isinstance(usage, dict) else 0
-    output_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
-    return ModelResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    assert isinstance(usage, dict)
+    return ModelResponse(
+        text=text,
+        input_tokens=_int_of(usage, "input_tokens"),
+        output_tokens=_int_of(usage, "output_tokens"),
+        cache_creation_tokens=_int_of(usage, "cache_creation_input_tokens"),
+        cache_read_tokens=_int_of(usage, "cache_read_input_tokens"),
+    )
 
 
 def _int_of(usage: dict[str, object], key: str) -> int:

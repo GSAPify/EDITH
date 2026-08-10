@@ -146,3 +146,95 @@ async def test_live_smoke_real_bifrost_200_nonempty():
             max_tokens=8,
         )
     assert resp.text.strip() != ""
+
+
+async def test_system_message_is_hoisted_and_marked_as_a_cache_breakpoint():
+    """The preamble must ride the top-level ``system`` field, carrying cache_control.
+
+    Sent as ``messages[0]`` it could not carry ``cache_control`` at all, so the preamble
+    was re-billed at full input price on every turn. It is also the wrong shape: a
+    leading ``role: "system"`` entry is rejected by some models and the gateway was
+    quietly normalizing it.
+    """
+    seen: dict[str, object] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json=_ok_body())
+
+    router = _router(httpx.MockTransport(handle))
+    await router.model_call(
+        [
+            {"role": "system", "content": "You are EDITH."},
+            {"role": "user", "content": "hello"},
+        ],
+        Tier.SONNET,
+    )
+
+    assert seen["system"] == [
+        {
+            "type": "text",
+            "text": "You are EDITH.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    # ...and it is no longer duplicated in messages
+    assert seen["messages"] == [{"role": "user", "content": "hello"}]
+
+
+async def test_messages_without_a_leading_system_are_passed_through():
+    """No system preamble → no ``system`` field, and messages are untouched."""
+    seen: dict[str, object] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json=_ok_body())
+
+    router = _router(httpx.MockTransport(handle))
+    await router.model_call([{"role": "user", "content": "hello"}], Tier.SONNET)
+
+    assert "system" not in seen
+    assert seen["messages"] == [{"role": "user", "content": "hello"}]
+
+
+async def test_cached_prefix_tokens_are_still_charged_to_the_budget():
+    """A cached prefix is reported under cache_* INSTEAD of input_tokens.
+
+    Charging input_tokens alone would bill Guard 14 tokens for a turn that actually
+    consumed a 4 800-token preamble — silently under-metering the window the budget
+    exists to enforce. Measured live: with a cache breakpoint, input_tokens fell from
+    ~4 800 to 14 while the prefix moved into cache_creation/cache_read.
+    """
+    charged: list[tuple[int, int]] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 14,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 4818,
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url=_BASE)
+    router = Router(
+        client=client,
+        api_key=_KEY,
+        models=_MODELS,
+        on_usage=lambda i, o: charged.append((i, o)),
+    )
+    response = await router.model_call([{"role": "user", "content": "hi"}], Tier.SONNET)
+
+    assert response.input_tokens == 14  # the uncached remainder, reported faithfully
+    assert response.cache_read_tokens == 4818
+    assert response.billable_input_tokens == 4832
+    assert charged == [(4832, 5)], "Guard must see the cached prefix, not just the remainder"
