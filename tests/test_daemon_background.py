@@ -159,9 +159,14 @@ def test_session_narration_can_be_disabled_from_the_cli() -> None:
 
     seen: dict[str, object] = {}
 
-    async def fake_amain(engine, data_dir, graph_refresh=False, session_narration=True):
+    async def fake_amain(
+        engine, data_dir, graph_refresh=False, session_narration=True, show_transcript=False
+    ):
         seen.update(
-            engine=engine, graph_refresh=graph_refresh, session_narration=session_narration
+            engine=engine,
+            graph_refresh=graph_refresh,
+            session_narration=session_narration,
+            show_transcript=show_transcript,
         )
         return 0
 
@@ -175,6 +180,50 @@ def test_session_narration_can_be_disabled_from_the_cli() -> None:
         assert seen["session_narration"] is True  # default unchanged
     finally:
         dmain._amain = original
+
+
+def test_show_transcript_flag_reaches_amain_and_defaults_off() -> None:
+    """--show-transcript is the only way to see what EDITH heard in full daemon mode.
+
+    The transcript echo lives in edith.voice.__main__ (voice-only), not the daemon, so
+    running the full daemon gave no way to tell "she never heard me" apart from "she heard
+    me and could not reply". Default must stay OFF: under launchd stdout is the unrotated,
+    unredacted edithd.out.log.
+    """
+    import edith.daemon.__main__ as dmain
+
+    seen: dict[str, object] = {}
+
+    async def fake_amain(engine, data_dir, graph_refresh=False, session_narration=True,
+                         show_transcript=False):
+        seen.update(show_transcript=show_transcript)
+        return 0
+
+    original = dmain._amain
+    dmain._amain = fake_amain
+    try:
+        assert dmain.main(["--show-transcript"]) == 0
+        assert seen["show_transcript"] is True
+        seen.clear()
+        assert dmain.main([]) == 0
+        assert seen["show_transcript"] is False  # never on by default
+    finally:
+        dmain._amain = original
+
+
+async def test_transcript_echo_prints_heard_and_spoken(capsys) -> None:
+    """The echo must fire on the real bus topics — heard input AND spoken answer."""
+    from edith.bus import EventBus
+    from edith.daemon.__main__ import _wire_transcript_echo
+
+    bus = EventBus()
+    _wire_transcript_echo(bus)
+    await bus.publish("voice.utterance", "voice_io", {"text": "what is up", "confidence": 0.9})
+    await bus.publish("brain.decision", "brain", {"answer": "All nominal, sir."})
+
+    out = capsys.readouterr().out
+    assert "[heard] 'what is up'" in out
+    assert "[edith] 'All nominal, sir.'" in out
 
 
 def test_daemon_guard_is_allowlisted_to_desktop_intents() -> None:

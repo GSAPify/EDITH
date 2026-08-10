@@ -23,7 +23,7 @@ import sys
 
 import httpx
 
-from edith.bus import EventBus
+from edith.bus import Event, EventBus
 from edith.daemon.edithd import EdithDaemon, resolve_secrets
 from edith.desktop import Intent
 from edith.guard import Guard
@@ -68,11 +68,36 @@ def _build_router(client: httpx.AsyncClient, api_key: str, guard: Guard) -> Rout
     )
 
 
+def _wire_transcript_echo(bus: EventBus) -> None:
+    """Echo what EDITH heard and what she answered to stdout (``--show-transcript``).
+
+    Off by default on purpose: under launchd, stdout is ``~/.edith/logs/edithd.out.log``,
+    which is neither redacted nor rotated (README §Known gaps), so every utterance would
+    persist to disk forever. Bus payloads have already been through ``sanitize_text``,
+    so this echoes redacted text — but redacted is not the same as safe to keep.
+    """
+
+    async def _on_utterance(event: Event) -> None:
+        text = str(event.payload.get("text", ""))
+        confidence = event.payload.get("confidence", "?")
+        print(f"[heard] {text!r}  (confidence={confidence})", flush=True)
+
+    async def _on_answer(event: Event) -> None:
+        answer = str(event.payload.get("answer", ""))
+        if answer:
+            print(f"[edith] {answer!r}", flush=True)
+
+    bus.subscribe("voice.utterance", _on_utterance)
+    bus.subscribe("brain.decision", _on_answer)
+    bus.subscribe("brain.background_done", _on_answer)
+
+
 async def _amain(
     engine: str,
     data_dir: str,
     graph_refresh: bool = False,
     session_narration: bool = True,
+    show_transcript: bool = False,
 ) -> int:
     secrets = resolve_secrets()
     if not secrets.bifrost_base_url or not secrets.bifrost_api_key:
@@ -81,6 +106,8 @@ async def _amain(
 
     # Shared bus so the live VoiceIO publishes voice.utterance onto the bus Brain reads.
     bus = EventBus()
+    if show_transcript:
+        _wire_transcript_echo(bus)
     try:
         from edith.voice.live import build_live_voice_io
 
@@ -150,6 +177,15 @@ def main(argv: list[str] | None = None) -> int:
             "corruption). Never deep-extracts."
         ),
     )
+    parser.add_argument(
+        "--show-transcript",
+        action="store_true",
+        help=(
+            "echo every heard utterance and spoken answer to stdout. OFF by default: under "
+            "launchd, stdout is the unrotated, unredacted ~/.edith/logs/edithd.out.log. Use it "
+            "in a dedicated terminal, not in the LaunchAgent."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         return asyncio.run(
@@ -158,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.data_dir,
                 args.graph_refresh,
                 session_narration=not args.no_session_narration,
+                show_transcript=args.show_transcript,
             )
         )
     except KeyboardInterrupt:
