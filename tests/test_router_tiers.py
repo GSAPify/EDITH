@@ -71,3 +71,33 @@ def test_estimate_tokens_is_roughly_chars_over_four() -> None:
 def test_ack_filler_never_suggests_background() -> None:
     d = resolve_tier(Tier.SONNET, task_type=TaskType.ACK_FILLER)
     assert d.suggest_background is False
+
+
+def test_resolve_models_defaults_to_the_current_generation() -> None:
+    """The tier->model map is the ONE place model ids live.
+
+    It used to be duplicated in edith/daemon/__main__.py and edith/voice/__main__.py behind a
+    TODO(config) flagging drift — and the two did drift in practice, since a bump had to be
+    applied in lockstep with nothing enforcing it. Ids carry no date suffix; the gateway
+    resolves the alias to the current dated snapshot.
+    """
+    import os
+
+    from edith.router import Tier, resolve_models
+
+    for var in ("BIFROST_MODEL_HAIKU", "BIFROST_MODEL_SONNET", "BIFROST_MODEL_OPUS"):
+        os.environ.pop(var, None)
+
+    models = resolve_models()
+    assert models[Tier.SONNET] == "claude-sonnet-5"  # the live talking voice
+    assert models[Tier.OPUS] == "claude-opus-5"  # depth + background reasoning
+    assert models[Tier.HAIKU] == "claude-haiku-4-5"
+    assert not any("-202" in m for m in models.values()), "model ids take no date suffix"
+
+
+def test_resolve_models_honors_env_overrides(monkeypatch) -> None:
+    """A tier can still be pinned without a code change."""
+    from edith.router import Tier, resolve_models
+
+    monkeypatch.setenv("BIFROST_MODEL_OPUS", "claude-opus-4-8")
+    assert resolve_models()[Tier.OPUS] == "claude-opus-4-8"

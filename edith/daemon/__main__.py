@@ -28,7 +28,7 @@ from edith.daemon.edithd import EdithDaemon, resolve_secrets
 from edith.desktop import Intent
 from edith.guard import Guard
 from edith.memory.vector import VectorMemoryStore
-from edith.router import Router, Tier
+from edith.router import Router, resolve_models
 
 _DEFAULT_DATA_DIR = "~/.edith/data"
 
@@ -48,14 +48,9 @@ def _build_guard() -> Guard:
 
 
 def _build_router(client: httpx.AsyncClient, api_key: str, guard: Guard) -> Router:
-    # NOTE: Bifrost model ids are duplicated from edith.voice.__main__ — a drift risk
-    # (owner guardrail on stale hardcoded constants). TODO(config): centralize a
-    # tier→model map both entry points read.
-    models = {
-        Tier.HAIKU: os.environ.get("BIFROST_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
-        Tier.SONNET: os.environ.get("BIFROST_MODEL_SONNET", "claude-sonnet-4-6"),
-        Tier.OPUS: os.environ.get("BIFROST_MODEL_OPUS", "claude-opus-4-8"),
-    }
+    # ONE tier→model map, shared with edith.voice.__main__ (closes the TODO(config) drift
+    # risk that used to live here — the two entry points had to be bumped in lockstep).
+    models = resolve_models()
     # Guard's two Router touchpoints (spec 11): gate the tier before the call, charge the
     # window after it. ``on_usage`` is what makes ``budget_used`` move at all — without it
     # the budget is theatre.

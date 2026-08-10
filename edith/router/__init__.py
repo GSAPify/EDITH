@@ -14,7 +14,7 @@ from edith.router.background import (
     supervised_reason,
 )
 from edith.router.bifrost import MODEL_CALL_ERRORS, ModelChunk, ModelResponse, Router
-from edith.router.tiers import TaskType, Tier, TierDecision, resolve_tier
+from edith.router.tiers import TaskType, Tier, TierDecision, resolve_models, resolve_tier
 
 __all__ = [
     "MODEL_CALL_ERRORS",
@@ -27,6 +27,7 @@ __all__ = [
     "TaskType",
     "Tier",
     "TierDecision",
+    "resolve_models",
     "resolve_tier",
     "supervised_reason",
 ]
