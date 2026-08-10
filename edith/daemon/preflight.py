@@ -91,16 +91,25 @@ def check_apple_events(runner: Callable[[list[str]], int] | None = None) -> Chec
     run = runner if runner is not None else _default_osascript
     if shutil.which("osascript") is None:
         return Check("Apple Events", False, "osascript not found on PATH", "")
-    code = run(["osascript", "-e", 'tell application "System Events" to get name'])
+    try:
+        code = run(["osascript", "-e", 'tell application "System Events" to get name'])
+    except subprocess.TimeoutExpired:
+        # The probe's whole purpose is to raise a consent dialog. An unanswered dialog
+        # blocks osascript until the timeout — which IS a failed check, not a crash.
+        # Letting it propagate would take down the run and lose the checks that already
+        # passed, on exactly the machine this exists to diagnose.
+        return Check("Apple Events", False, "no response to the consent dialog", _AUTOMATION_FIX)
+    except OSError as exc:
+        return Check("Apple Events", False, f"could not run osascript: {exc}", _AUTOMATION_FIX)
     if code == 0:
         return Check("Apple Events", True, "System Events reachable")
-    return Check(
-        "Apple Events",
-        False,
-        f"osascript exited {code}",
-        "System Settings > Privacy & Security > Automation — allow your terminal to "
-        "control System Events (and Spotify / Terminal for desktop control).",
-    )
+    return Check("Apple Events", False, f"osascript exited {code}", _AUTOMATION_FIX)
+
+
+_AUTOMATION_FIX = (
+    "System Settings > Privacy & Security > Automation — allow your terminal to "
+    "control System Events (and Spotify / Terminal for desktop control)."
+)
 
 
 def check_wake_model(exists: Callable[[str], bool] | None = None) -> Check:

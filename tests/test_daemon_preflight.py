@@ -110,3 +110,30 @@ def test_render_lists_fixes_only_for_failures() -> None:
 
 def test_render_all_passing() -> None:
     assert "All 1 checks passed" in render([Check("A", True, "fine")])
+
+
+def test_unanswered_consent_dialog_is_a_failed_check_not_a_crash() -> None:
+    """The probe exists to RAISE a consent dialog, so a timeout is the expected case.
+
+    An unanswered dialog blocks osascript until the timeout. Letting TimeoutExpired
+    propagate would take down the whole run and lose the checks that already passed —
+    on exactly the machine this exists to diagnose.
+    """
+    import subprocess
+
+    def hangs(_args: list[str]) -> int:
+        raise subprocess.TimeoutExpired(cmd="osascript", timeout=20)
+
+    check = check_apple_events(runner=hangs)
+    assert not check.ok
+    assert "consent dialog" in check.detail
+    assert "Automation" in check.fix
+
+
+def test_osascript_os_error_is_reported_not_raised() -> None:
+    def boom(_args: list[str]) -> int:
+        raise OSError("exec format error")
+
+    check = check_apple_events(runner=boom)
+    assert not check.ok
+    assert "exec format error" in check.detail
