@@ -13,7 +13,7 @@ and working style, and takes action on your behalf. Everything runs under the ho
 
 **All numbered slices (0–6) are built, every seam deferred out of them is closed, and the four
 operationalization items — launchd, Guard wiring, menu bar, scheduled refresh — have landed.**
-**416 passed, 2 skipped** (`ruff check edith tests` clean).
+**515 passed, 2 skipped** (`ruff check edith tests` clean).
 
 What remains is **owner live-smoke**, not code. The hardware, GUI and launchd paths cannot be
 exercised headlessly, so nothing below proves EDITH starts under a real launchd session or that
@@ -33,16 +33,27 @@ the menu bar renders. See [Known gaps](#known-gaps) for the honest list.
 | — | `Memory.compact()` (bounded conv-Fact eviction) | done |
 | — | launchd LaunchAgent (`deploy/`) — always-on at login | done; `launchctl bootstrap` = owner smoke |
 | — | Menu-bar control app (`edith/menubar/`) | done; rendering = owner smoke |
-| — | Guard (`authorize` + windowed token budget) | wired; **gate is inert by default** — see below |
+| — | Guard (`authorize` + windowed token budget) | wired; gate is **default-deny** in the shipped daemon — see below |
 | — | Weekly graph refresh (in-process, `--graph-refresh`) | done, off by default |
 | — | Memory viewer · Repo ingestion · NL finder · Workspace graph | done (tooling) |
 
 **Read the Guard row carefully.** The budget half is real and metering: every `model_call*`
 charges `Guard.record`, and opus is cut before Sonnet/Haiku so the live voice degrades last. The
-**authorization** half is not. `Guard`'s default denylist (`rm_rf`, `drop_table`, …) and the
-desktop `Intent` vocabulary (`open_app`, `spotify`, `terminal`, `omc_launch`) are disjoint sets,
-so `authorize()` returns ALLOW for every OS action the daemon can actually take. Do not read
-"Guard is wired" as "OS actions are gated" — they are not.
+**authorization** half is now real too, but narrower than "Guard gates OS actions" suggests.
+`edith/daemon/__main__.py` builds the daemon's one Guard with an **allowlist** of the closed
+desktop vocabulary (`open_app`, `spotify`, `terminal`, `omc_launch`), which flips the default from
+"allow unless denylisted" to **deny unless vetted** — the correct posture for a finite enum, since
+a denylist can only cover verbs someone thought to add. Two caveats survive:
+
+- **Guard matches the intent *verb*, never the argument.** `"open /tmp/evil.app"` is `open_app`
+  either way; that exploit is closed by the executor refusing bundle *paths*, not by the gate.
+- **ASK is unreachable for desktop control.** `DesktopControlSkill.needs_confirmation` is `False`,
+  so allowed intents run without a confirm step. A real voice-confirm ("should I?" → listen) is
+  what would make ASK mean something, and no such path exists anywhere yet.
+
+`EdithDaemon` itself falls back to a bare `Guard()` (denylist-only, so effectively inert) when no
+Guard is injected. That is the test/embedding path — the shipped `python -m edith.daemon` always
+injects the allowlisted one.
 
 ## Architecture
 
@@ -91,7 +102,8 @@ tier-aware — opus is capped at a fraction of the window so it is cut off befor
 The practical guarantee is that **EDITH cannot go mute from budget exhaustion**: she loses deep
 thinking and spoken narration first, and the live conversational path is never gated.
 
-**Guard's `authorize` is wired but currently decides nothing** — see the Status note above.
+**Guard's `authorize` now denies anything outside the desktop vocabulary** — with the two caveats
+in the Status note above (verb-not-argument matching, and ASK still unreachable).
 
 Everything is behind **injectable seams** (mic/wake/STT/TTS, `gh`, the model gateway, the
 transcript tap, `osascript`/`open`), so the core is headless-testable and the hardware/network
@@ -131,6 +143,16 @@ python -m edith.daemon --engine elevenlabs     # or --engine piper
 ```
 
 Then say **"Hey Edith, …"**. Ctrl-C stops her.
+
+Run `python -m edith.daemon --preflight` **first, on a new machine or after an OS update**. It
+probes every capability the daemon needs — microphone, wake model, speech, gateway, Apple Events —
+prints what is missing and exits. Touching each one provokes the macOS permission prompt *there*,
+where you expect it, instead of mid-conversation where a denied prompt just looks like a broken
+feature.
+
+Add `--show-transcript` to echo every heard utterance and spoken answer to stdout. Off by default,
+and deliberately: under launchd stdout is `~/.edith/logs/edithd.out.log`, which is neither
+redacted nor rotated. Use it in a dedicated terminal, not in the LaunchAgent.
 
 Add `--graph-refresh` to also run the weekly model-free graph refresh in-process. It is **off by
 default**. It refreshes on start and then every 7 days of *uptime* — an interval, not a calendar
@@ -198,7 +220,13 @@ python -m edith.ingest --reembed              # embed graph-only Facts (local em
 python -m edith.finder "seo tools"            # natural-language repo finder + resolve-on-miss
 python -m edith.voice --engine elevenlabs     # voice loop only, no daemon/session tap
 python -m edith.session                       # session-awareness tap → narrate (--engine for audio)
+python -m edith.voice.aec_bench --backend vpio --hardware macbook   # echo-cancellation bench (spike)
 ```
+
+The last one is the **echo-cancellation spike**, not a shipped subsystem — see Known gaps. It
+needs the `[duplex]` extra (`uv pip install -e '.[duplex]'`) plus a real mic and speaker, so it is
+owner-run only. It plays a deterministic stimulus, captures the cancelled mic, archives all three
+signals under `~/.edith/aec_bench/` and appends a row to `results.jsonl`.
 
 **Only one process may hold the graph at a time** — Kuzu embedded is single-process, so stop the
 daemon (and the viewer) before running ingest or the finder against `~/.edith/data/memory.kuzu`.
@@ -216,6 +244,8 @@ edith/
   skills/     Skill contract + gh runner + PRReviewSkill + SessionQuerySkill
   desktop/    command parser + RepoResolver + osascript/open executors (DesktopControlSkill)
   voice/      TTS adapters (ElevenLabs/Piper) + VoiceIO + live wake/STT loop + persona
+    duplex/     full-duplex audio spike: macOS VPIO backend + SpeexDSP canceller core
+    aec_bench/  headless ERLE / double-talk / latency bench for those backends
   session/    transcript collector + SessionBus + Narrator (session awareness)
   finder/     NL repo finder + resolve-on-miss
   ingest/     repo → graph pipeline (discover → fetch → redact → classify → map) + workspace pass
@@ -226,7 +256,7 @@ edith/
 ## Development
 
 ```bash
-pytest                    # 416 passed, 2 skipped
+pytest                    # 515 passed, 2 skipped
 ruff check edith tests    # lint (scoped: scripts/sagemaker has 3 pre-existing SIM115)
 pyright                   # types (basic mode; see the note below)
 ```
@@ -243,13 +273,12 @@ or `.venv/bin/python -m pytest`. None of the three is caused by your change.
 
 ## Known gaps
 
-- **Guard's `authorize` decides nothing in the shipped config.** The budget half is real and
-  metering. The authorization half is not: `Guard`'s default denylist and the desktop `Intent`
-  vocabulary are disjoint sets, and `needs_confirmation` is a `False` class constant, so
-  `authorize()` returns ALLOW for every OS action the daemon can take. The reachable exploit that
-  came with that — `"open /tmp/evil.app"` running an attacker-planted bundle — is closed by
-  refusing bundle *paths*, but the gate itself is inert. Making `Guard` default-deny over its
-  closed enum is the real fix and is its own change.
+- **Guard's `authorize` is default-deny now, but ASK is still unreachable.** The composition root
+  allowlists the four desktop intents, so anything outside them is DENY. What is still missing is
+  the middle verdict: `DesktopControlSkill.needs_confirmation` is a `False` class constant and
+  `PRReviewSkill`'s `Confirm` callable defaults to `_deny`, so nothing in the daemon can actually
+  *ask*. Guard also matches the intent verb, never its argument — argument safety stays with the
+  executors (bundle paths are refused there).
 - **No `SIGTERM` handler.** `launchctl bootout` is therefore an *ungraceful* stop:
   `EdithDaemon.stop()` never runs, so `compact()` and `MemoryStore.close()` are skipped. Wants a
   signal handler plus a `KeepAlive` policy that distinguishes an intentional stop from a crash.
@@ -265,6 +294,14 @@ or `.venv/bin/python -m pytest`. None of the three is caused by your change.
 - **Kuzu embedded is single-process.** The production fix is routing all DB access through
   `edithd`; today it is "only run one thing at a time", and an always-on daemon means `bootout`
   before the viewer, finder or ingest.
+- **Full duplex is a spike, and the half-duplex gate is still what ships.** `edith/voice/duplex/`
+  + `aec_bench/` exist to answer whether EDITH can hear the wake word while she is speaking (the
+  problem `--no-session-narration` works around). Where it stands: the macOS Voice Processing I/O
+  backend measures **7.8 dB ERLE** on this MacBook, the SpeexDSP arm is a canceller *core* with no
+  `DuplexAudio` backend yet (`--backend speex` raises `DuplexUnavailable`), and the bench's
+  `added_latency_ms` is **known-bad** — it reports playback queue depth, because the capture loop's
+  pacing is not sample-accurate enough to feed an otherwise-correct metric. Nothing in the voice
+  path consumes any of it.
 - **Owner live-smoke outstanding** for everything that needs real hardware or a real session:
   `launchctl bootstrap`, the menu bar rendering and its confirm dialog, the full voice loop,
   desktop-control OS actions (Spotify / Terminal / OMC), background reasoning's spoken ping, and
@@ -275,7 +312,7 @@ or `.venv/bin/python -m pytest`. None of the three is caused by your change.
 | File | What it is |
 |------|------------|
 | [`docs/specs/00-north-star.md`](docs/specs/00-north-star.md) | Full architecture. **Read this first.** |
-| [`docs/specs/01`–`13`](docs/specs/) | Per-slice specs + Completion Records (01–06 are the numbered slices; 07–13 the follow-ons) |
+| [`docs/specs/01`–`14`](docs/specs/) | Per-slice specs + Completion Records (01–06 are the numbered slices; 07–14 the follow-ons) |
 | [`deploy/README.md`](deploy/README.md) | launchd install/uninstall runbook + the Kuzu-lock consequences |
 | [`docs/SESSION-PROTOCOL.md`](docs/SESSION-PROTOCOL.md) | How to resume across sessions (the 90%-context rule) |
 | [`STATE.md`](STATE.md) | Current status + what to do next — **the resume file** |
