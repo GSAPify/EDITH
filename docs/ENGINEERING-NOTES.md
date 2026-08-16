@@ -200,8 +200,8 @@ waking live, because it read `scores.get(path)` instead of `max(scores.values())
 | Path | Status |
 |------|--------|
 | `launchctl bootstrap`, surviving logout and login | outstanding |
-| Menu-bar rendering and its confirm dialog | rendering owner-confirmed; confirm dialog outstanding |
-| Full voice loop end to end | wake word confirmed live; full loop outstanding |
+| Menu-bar rendering and its confirm dialog | rendering owner-confirmed per `STATE.md`; confirm dialog outstanding |
+| Full voice loop end to end | wake word confirmed live per `STATE.md`; full loop outstanding |
 | Desktop-control OS actions (Spotify, Terminal, OMC) | outstanding. AppleScript compiles clean and the resolver ran against the real repo tree |
 | Background reasoning's spoken ping | outstanding |
 | A real graph-refresh pass against the live graph | outstanding |
