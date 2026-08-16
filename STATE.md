@@ -29,7 +29,7 @@ remote branches (`build/slice-3-voice`, `docs/readme-refresh`, `feat/daemon-comp
 | 4 | Session awareness | ✅ done | ✅ done | `edith/session/`: **spike** (transcript-tail confirmed on the live machine — see `scratch/spike_session_tap_findings.md`) → **TranscriptCollector** (dep-free EOF-seek poller of `~/.claude/projects/**/*.jsonl`; primes to EOF so history is NOT replayed) → **SessionBus** (normalize→classify→**REDACT choke-point**→`session.event`/`session.state` + in-mem states map + Control API `last_event`) → **Narrator** (3-class policy: silent / spoken-local template / model-gated haiku; idle via `tick()`) → **SessionQuerySkill** ("what is session 2 doing?" via Brain dispatch, phrase triggers). edithd wires it all (`enable_session_awareness` flag gates the live tail off in tests). Hardened `sanitize_text` with a **connection-URI password** pattern (the killer-demo leak). **35 new tests (196 total +1 skipped), ruff/pyright clean.** LIVE-smoked on real transcripts: 11.7k events classified, real pasted Snowflake/Postgres creds → `[REDACTED]`, 0 leaks. **Cost gate (spec #5): per-session error-narration cooldown** — measured 452→72 model calls over the real stream (~0.6/session); Guard's real budget still deferred. Deviations (documented): Narrator is a collaborator (not in Brain); collector polls (not watchdog). |
 | 5 | Router | ✅ done | ✅ done | `edith/router/`: `tiers.py` (`resolve_tier` + `TaskType`; owns the `Tier` enum now) — latency-first policy (Sonnet=live voice, Haiku=acks, Opus=explicit/background), override rules (ACK_FILLER→Haiku, HAIKU→Sonnet on size, OPUS budget-gated→Sonnet+`budget_limited`, deep signal→Sonnet+`suggest_background`). `bifrost.py`: `model_call_stream` (Anthropic SSE→`ModelChunk`), **`model_call_masked`** (tier-parameterized, answer defaults SONNET not opus; TRUE overlap — both requests fire before draining), `budget_check`+`redactor` seams, **redaction choke-point inside every `model_call*`**. Non-streaming POST unchanged (callers untouched). **17 new tests (212 total +1 skipped), ruff/pyright clean.** LIVE-smoked: `model_call_stream` vs REAL Bifrost yielded real tokens (SSE parser verified against actual stream). **Session 19 update (PR #18):** `edith/router/background.py` now ships `supervised_reason` (draft Sonnet → Opus critique+improve, awaited, consumable) + a `think_async` free function. **Still UNMET:** `think_async` has **no production consumer** (nothing speaks a ~20 s-late answer through the voice half-duplex gate / cooldown / conversation-window), and `resolve_tier`'s `suggest_background` flag is still returned-but-unacted — that's exactly what open **PR #20** builds (and why it's worth resolving rather than closing). Masking still has no live consumer (needs VoiceIO `speak_stream`); OpenAI provider-swap config-only. |
 | 6 | Desktop control | ✅ done | ✅ done | `edith/desktop/` (parser + `RepoResolver` + executors behind an injected `Runner` seam) + `DesktopControlSkill` (registered LAST in edithd, `needs_confirmation=False`, AUTO-only). "open Spotify", "play X on Spotify", "pause/skip/volume", "open a terminal in <repo>", "start OMC in <repo>". Terminal.app `do script` for terminal AND OMC (claude=interactive TTY, no headless Popen — Option-C deviation). RepoResolver: filesystem-first + difflib, prefers flat over org-nested dup. Code-reviewed (REQUEST_CHANGES → all findings fixed: false-success on non-zero exit, escaping, hyphen-parse, dispatch dead-end via new `SkillResult.handled`). **264 tests, ruff/pyright clean.** Safe live: parsed spec examples, osacompiled AppleScript clean, resolver vs real ~/gitstuff. Owner OS live-smoke pending. |
-| — | Guard (autonomy + budget) | (11) | ✅ built, ⚠ not wired | PR #17. `edith/guard/guard.py`: pure policy object — `authorize(action, needs_confirmation) → Decision{ALLOW,ASK,DENY}` (denylist) + windowed token budget (`token_budget`, `window_seconds`, injected `clock`). No I/O, no model calls, no bus → trivially testable, construct once + inject. Does NOT duplicate redaction (§6.1 stays with `sanitize_text` at the Router choke-point). **134 test lines / suite green.** ~~⚠ Nobody constructs it yet~~ **WIRED in Session 20 (PR #27):** one Guard per daemon in the composition root → `Router.budget_check`, `BackgroundReasoner`, `Narrator.budget_gate` (adapted — it's a no-arg `Callable[[], bool]`, bound to `Tier.HAIKU`), `control.py`'s `BudgetView` (so the menu bar shows real usage), **plus a NEW gate call site in `DesktopControlSkill`** — there was never an `authorize()` seam in `edith/desktop/`, contrary to what this file used to say. The charge path is the crux and it is closed: a new `on_usage` seam on `Router` calls `Guard.record` from `model_call` and `model_call_stream`; `model_call_masked` delegates to both so it is charged twice for its two billing events and **must not** get a third call site. **Safety property, verified: `budget_check` is only ever called with `Tier.OPUS` (`bifrost.py:229`, `background.py:156`) plus HAIKU for narration — nothing gates the live conversational path, so exhaustion downgrades opus→Sonnet and drops narration to a local template but EDITH cannot go mute.** |
+| — | Guard (autonomy + budget) | (11) | ✅ built + wired + default-deny | PR #17. `edith/guard/guard.py`: pure policy object — `authorize(action, needs_confirmation) → Decision{ALLOW,ASK,DENY}` (denylist) + windowed token budget (`token_budget`, `window_seconds`, injected `clock`). No I/O, no model calls, no bus → trivially testable, construct once + inject. Does NOT duplicate redaction (§6.1 stays with `sanitize_text` at the Router choke-point). **134 test lines / suite green.** ~~⚠ Nobody constructs it yet~~ **WIRED in Session 20 (PR #27):** one Guard per daemon in the composition root → `Router.budget_check`, `BackgroundReasoner`, `Narrator.budget_gate` (adapted — it's a no-arg `Callable[[], bool]`, bound to `Tier.HAIKU`), `control.py`'s `BudgetView` (so the menu bar shows real usage), **plus a NEW gate call site in `DesktopControlSkill`** — there was never an `authorize()` seam in `edith/desktop/`, contrary to what this file used to say. The charge path is the crux and it is closed: a new `on_usage` seam on `Router` calls `Guard.record` from `model_call` and `model_call_stream`; `model_call_masked` delegates to both so it is charged twice for its two billing events and **must not** get a third call site. **Safety property, verified: `budget_check` is only ever called with `Tier.OPUS` (`bifrost.py:229`, `background.py:156`) plus HAIKU for narration — nothing gates the live conversational path, so exhaustion downgrades opus→Sonnet and drops narration to a local template but EDITH cannot go mute.** **DEFAULT-DENY since PR #40:** `daemon/__main__.py` builds the one Guard with `allowlist=frozenset(intent.value for intent in Intent)`, flipping the posture from "allow unless denylisted" to "deny unless vetted" — the right shape for a 4-value vocabulary, since a denylist only ever covers verbs someone thought to add. Precedence in `authorize`: denylist DENY wins, then allowlist DENY, then `needs_confirmation` ASK, else ALLOW. Still true: the gate matches the intent **verb**, never the argument, and ASK is unreachable (see §Next action). |
 | — | `Memory.compact()` | (01 seam) | ✅ done | PR #19. Bounded conversation-Fact eviction across `edith/memory/store.py` + `vector.py` (graph rows AND their sqlite-vec embeddings, so compaction can't leave orphaned vectors). Closes the oldest seam in the repo (deferred since Slice 1). Not yet called on a schedule by the daemon. |
 | — | Memory viewer | (07) | ✅ done | Offline local graph viewer: `MemoryStore.graph_snapshot()` + `edith/viewer/` (stdlib 127.0.0.1 server, vendored force-graph UMD, `--demo` seeder, `python -m edith.viewer`). **70 tests + 1 live-skipped, ruff/pyright clean.** Zero new runtime deps. Reads live Memory; repo ingestion populates it for real. |
 | — | Repo ingestion | (08) | ✅ done | `edith/ingest/` populates the LIVE graph from local `patterninc` clones: discover→fetch→**REDACT (choke-point)**→Sonnet classify/Opus deep→map→`remember`. `python -m edith.ingest [--dry-run] [--repos] [--limit] [--data-dir] [--max-tokens]`, incremental skip on `Repo.last_commit_date`, secret-safe status report, one-time global `~/.claude/CLAUDE.md` owner context. Additive schema (`Repo` +4 cols, `Fact.source`, `authored_by` Repo→Person). **97 tests + 1 live-skipped, ruff/pyright clean.** Live smoke: 58 nodes to a temp dir, secret-scan clean. Full contributed-repos run is orchestrator-gated pending review. |
@@ -116,8 +116,9 @@ combination is the 408-passing tree above. Not a design conflict.
   apology) for ~1.3 min/week. Deliberate (avoids a new deadlock class); revisit if it grates.
 - **`BackgroundReasoner.on_done` and `finder/resolve.py::_deep_extract`** write the same Memory
   handle without checking `is_paused`, so they can still race #28's worker thread.
-- **ASK is unreachable for desktop control.** #27 maps ASK→DENY fail-closed, but nothing sets
-  `needs_confirmation=True` on that skill, so only the denylist bites. A real voice-confirm
+- **ASK is unreachable for desktop control.** #27 maps ASK→DENY fail-closed and #40 made the gate
+  default-deny over the four intents, but nothing sets `needs_confirmation=True` on that skill, so
+  the *middle* verdict still cannot happen. A real voice-confirm
   ("should I?" → listen) is what would make ASK mean something — `PRReviewSkill`'s `Confirm`
   callable defaults to `_deny` and the daemon wires that default, so no such path exists anywhere.
 - `last_commit_date` incremental skip; routing all Kuzu access through `edithd`.
@@ -140,6 +141,32 @@ fold these into the sections above with that detail, then delete this subsection
 
 PR #36 (`docs/readme-test-count-and-narration-flag`, merged) documented #35's flag in the README
 and fixed the test count it left stale (410 → 416). This STATE.md catch-up is its own follow-up PR.
+
+### ⚠ Catch-up part 2 — PRs #38–#52 (also mechanical)
+
+Same caveat as above: read off `git log` + `gh pr list`, no verification detail claimed beyond the
+suite. **Master is now `aac4ebc` = 507 passed, 2 skipped, `ruff check edith tests` clean.**
+(#36/#37 are the two docs PRs already described above.)
+
+| PR | Branch | Commit | What |
+|----|--------|--------|------|
+| #38 | `fix/desktop-spotify-bad-classifier-reply` | `0069e04` | a bad classifier reply raised `ValueError` out of `Brain._dispatch_skill` and killed the whole turn — caught now. Was filed-not-built in §Security review |
+| #39 | `fix/secrets-repr-leaks-key` | `c3e641d` | `Secrets.__repr__` printed the API key. `field(repr=False)`, as filed |
+| #40 | `feat/guard-default-deny-desktop-vocabulary` | `9ed9462` | **`Guard.authorize` is default-deny now.** The composition root passes an `allowlist` of the four `Intent` values, so anything outside `{open_app, spotify, terminal, omc_launch}` is DENY. This is the "make it default-deny over its closed enum" item, built |
+| #41 | `feat/daemon-show-transcript` | `1ee88cc` | `--show-transcript` echoes heard utterances + spoken answers. Off by default: under launchd stdout is the unrotated, unredacted `edithd.out.log` |
+| #42–#48 | rolled up as **#49** | `03b2009` | the voice-fix stack, landed together: `EDITH_WAKE_MODEL` actually honored instead of listening for `hey_jarvis` (#42); tiers moved to **opus-5 / sonnet-5 behind one shared model map** (#43); conversation window held 3 exchanges, not the 6 it claimed (#44); **prompt caching**, with the cached prefix charged to the budget (#45); mic thread stops cooperatively so Ctrl-C stopped segfaulting (#46); `--preflight` provokes every macOS permission prompt then reports (#47); mic pre-roll so a word's quiet onset is not clipped (#48) |
+| #50 | `feat/aec-bench-foundation` | `5e0c257` | headless echo-cancellation bench: deterministic stimulus, ERLE/double-talk/latency metrics, `FakeDuplex`, runner that archives audio |
+| #51 | `feat/duplex-vpio-backend` | `c1f0195` | `VpioDuplex` — macOS Voice Processing I/O (Apple's own canceller) behind the duplex seam |
+| #52 | `feat/duplex-aec3-backend` | `d3c5ac4` | `SpeexEchoCanceller` as the software arm. **Core only — there is no `DuplexAudio` backend for it yet.** WebRTC AEC3 was the intended comparison and cannot be built here (see the `pyproject.toml` note) |
+
+**Open, not merged:** **#54** (`feat/aec-bench-cli`) makes the bench runnable and fixes three
+defects the first real-hardware run exposed — measured **ERLE 2.1 → 7.8 dB**; `added_latency_ms` is
+documented known-bad (reports playback queue depth). **#55** is the matching README catch-up.
+With #54 in the tree the suite is **515 passed, 2 skipped**.
+
+**Why the duplex work exists:** it is the real fix for what `--no-session-narration` (#35) works
+around — the half-duplex mic gate means EDITH cannot hear the wake word while she speaks. It is a
+**spike**: nothing in the voice path consumes any of it yet.
 
 ---
 
@@ -256,6 +283,16 @@ in `.env`/chat and used live this session.
   Enforcing beats documenting — the old runbook said only "never commit it", and *permissions*
   were what actually mattered. **⚠ OWNER DECISION: rotate both keys** if that account has ever
   been reachable by anyone else. (This is the third standing reason to rotate — see §Blockers.)
+- ~~**🔴 Guard's autonomy gate is INERT in every shipped config.**~~ **FIXED by PR #40** — the
+  composition root now builds the Guard with an `allowlist` of the four `Intent` values, so
+  `authorize()` DENIES anything outside the closed desktop vocabulary instead of allowing
+  everything. **Two caveats survive:** Guard matches the intent **verb**, never the argument (so
+  argument safety stays with the executors — that is where bundle paths are refused), and **ASK is
+  still unreachable** because `needs_confirmation` is `False` on `DesktopControlSkill` and
+  `PRReviewSkill`'s `Confirm` defaults to `_deny`. Also note `EdithDaemon` still falls back to a
+  bare `Guard()` (denylist-only, inert) when none is injected — the test/embedding path, not what
+  `python -m edith.daemon` ships. **The original finding is kept verbatim in the bullet below**, both
+  because it records how the hole was found empirically and because its bundle-path note still holds.
 - **🔴 Guard's autonomy gate is INERT in every shipped config.** Verified empirically, not
   inferred: `Intent` values are `{open_app, spotify, terminal, omc_launch}`, `_DEFAULT_DENYLIST`
   is `{rm_rf, drop_table, force_push, shutdown, disk_wipe}` — **intersection EMPTY** — and
@@ -266,11 +303,10 @@ in `.env`/chat and used live this session.
   bundle, reachable by anyone within earshot — **is fixed** in #27 by refusing bundle *paths*
   (`"open Slack"` still works). Guard cannot catch that class at any denylist setting: it
   matches the intent **verb**, never the argument.
-- **Filed, not built** (each changes semantics for every caller, so each is its own PR):
-  make `Guard.authorize` **default-deny** over its closed enum — the correct shape for a
-  4-value vocabulary; validate `spotify_cmd` (an unhandled `ValueError` from a bad classifier
-  reply escapes `Brain._dispatch_skill` and kills the turn); `Secrets.__repr__` exposes the key
-  (unreachable today, but `field(repr=False)` is one line).
+- ~~**Filed, not built**~~ **ALL THREE NOW BUILT**, each as its own PR as planned:
+  `Guard.authorize` default-deny over its closed enum (**#40**); the `spotify_cmd` `ValueError`
+  from a bad classifier reply that escaped `Brain._dispatch_skill` and killed the turn (**#38**);
+  `Secrets.__repr__` exposing the key (**#39**).
 - **Logs are NOT redacted and NOT rotated.** `sanitize_text` is the choke-point for model/TTS/bus
   payloads; it does not run on log records. Python's `lastResort` handler sends WARNING+ to
   stderr — e.g. `TranscriptCollector` poll errors derived from tailing `~/.claude/projects` —
@@ -296,8 +332,10 @@ in `.env`/chat and used live this session.
   `enable_graph_refresh`. Never deep-extracts. Still unverified against the live graph, and the
   graph is still at its 2026-07-12 write until someone enables it.
 - ~~**Guard exists but gates nothing (Session 19).**~~ **ADDRESSED Session 20 (PR #27)** — see the
-  Guard row in the slice table. Caveat that survives: only the **denylist** actually bites for
-  desktop control, since nothing sets `needs_confirmation=True` on that skill.
+  Guard row in the slice table. **PR #40 closed the caveat that used to live here** —
+  the gate is default-deny over the desktop vocabulary now, not denylist-only. What survives is
+  narrower: **ASK is unreachable** (nothing sets `needs_confirmation=True` on that skill), and the
+  gate matches the intent verb, never its argument.
 - **A stranded-commit pattern has now bitten twice.** Session 17 lost `458f77f`; Session 20 found
   `2227b73` (a `compact()` review fix — a broad `except Exception` around a sqlite prune, and a
   duplicated selection query across both `compact()`s) sitting unmerged on `feat/memory-compact`
