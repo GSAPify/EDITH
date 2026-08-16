@@ -159,7 +159,8 @@ suite. **Master is now `aac4ebc` = 507 passed, 2 skipped, `ruff check edith test
 | #51 | `feat/duplex-vpio-backend` | `c1f0195` | `VpioDuplex` — macOS Voice Processing I/O (Apple's own canceller) behind the duplex seam |
 | #52 | `feat/duplex-aec3-backend` | `d3c5ac4` | `SpeexEchoCanceller` as the software arm. **Core only — there is no `DuplexAudio` backend for it yet.** WebRTC AEC3 was the intended comparison and cannot be built here (see the `pyproject.toml` note) |
 
-**Open, not merged:** **#54** (`feat/aec-bench-cli`) makes the bench runnable and fixes three
+**Open as of `aac4ebc`** (check `gh pr list` before trusting this — either may have merged since):
+**#54** (`feat/aec-bench-cli`) makes the bench runnable and fixes three
 defects the first real-hardware run exposed — measured **ERLE 2.1 → 7.8 dB**; `added_latency_ms` is
 documented known-bad (reports playback queue depth). **#55** is the matching README catch-up.
 With #54 in the tree the suite is **515 passed, 2 skipped**.
