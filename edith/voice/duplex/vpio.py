@@ -81,7 +81,16 @@ class VpioDuplex:
         self,
         frame_samples: int = FRAME_SAMPLES,
         pcm_sample_rate: int = DEFAULT_PCM_SAMPLE_RATE,
+        enable_aec: bool = True,
     ) -> None:
+        """*enable_aec* False runs the identical audio graph with cancellation OFF.
+
+        This is not a debug switch — it is half of the ERLE measurement. Echo Return Loss
+        Enhancement is the ratio of echo energy entering the canceller to echo energy
+        leaving it, so it needs the SAME acoustic path captured both ways. Comparing the
+        digital stimulus against the cancelled capture instead would measure the
+        speaker-to-mic path loss, which is large, and report it as cancellation.
+        """
         try:
             import AVFoundation  # noqa: PLC0415 — optional macOS-only dependency
         except ImportError as exc:  # pragma: no cover - depends on the host
@@ -102,8 +111,9 @@ class VpioDuplex:
 
         self._engine = AVFoundation.AVAudioEngine.alloc().init()
         self._input = self._engine.inputNode()
-        enabled, error = self._input.setVoiceProcessingEnabled_error_(True, None)
-        if not enabled:
+        self._aec_enabled = enable_aec
+        enabled, error = self._input.setVoiceProcessingEnabled_error_(enable_aec, None)
+        if not enabled and enable_aec:
             raise DuplexUnavailable(f"could not enable Voice Processing I/O: {error}")
 
         audio_format = AVFoundation.AVAudioFormat.alloc()
