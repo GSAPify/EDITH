@@ -146,8 +146,8 @@ python -m edith.voice.aec_bench --backend vpio --hardware macbook   # echo-cance
 **Only one process may hold the graph at a time.** Kuzu embedded is single-process, so stop the
 daemon and the viewer before running ingest or the finder against `~/.edith/data/memory.kuzu`.
 
-The bench is the echo-cancellation spike rather than a shipped subsystem. It needs the `[duplex]`
-extra plus a real mic and speaker, so it is owner-run only. See
+The bench is the echo-cancellation spike rather than a shipped subsystem. It needs
+`uv pip install -e '.[duplex]'` plus a real mic and speaker, so it is owner-run only. See
 [Limitations](#limitations).
 
 ## Architecture
