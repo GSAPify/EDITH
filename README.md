@@ -15,7 +15,8 @@ and working style, and takes action on your behalf. Everything runs under the ho
 operationalization items — launchd, Guard wiring, menu bar, scheduled refresh — have landed.**
 **515 passed, 2 skipped** (`ruff check edith tests` clean).
 
-What remains is **owner live-smoke**, not code. The hardware, GUI and launchd paths cannot be
+What remains is **owner live-smoke**, not code — outside the duplex/echo-cancellation spike, which
+is unfinished by design (see [Known gaps](#known-gaps)). The hardware, GUI and launchd paths cannot be
 exercised headlessly, so nothing below proves EDITH starts under a real launchd session or that
 the menu bar renders. See [Known gaps](#known-gaps) for the honest list.
 
