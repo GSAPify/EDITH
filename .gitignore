@@ -38,3 +38,6 @@ logs/
 
 # Agent worktrees (Claude Code isolation) — never commit these
 .claude/worktrees/
+
+# OpenMemory - IDE/Assistant specific rules
+.cursor/rules/openmemory.mdc
