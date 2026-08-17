@@ -146,3 +146,59 @@ Built by a 3-agent team (disjoint headless units) + lead integration, on
   window and skips capture. Bridged `_on_wake` exceptions are logged (no silent swallow).
   `max_tokens` aligned to the documented 120. Redaction, self-echo defense, thread-safety, and
   unbounded-growth all reviewed clean.
+  **⚠ SUPERSEDED (2026-08-17):** the `saw_utterance` latch described above has since been DELETED.
+  It was an uncorrelated boolean (it didn't know WHICH utterance/reply it was latching onto), which
+  under overlapping TTS could open follow-up off the wrong speech or miss it entirely. Replaced by
+  the `speak`/`speak_response` split + one-shot per-response completion signal — see the
+  **Follow-up record — 2026-08-17** below for the current mechanism. Kept here for history only.
+
+---
+
+## Follow-up record — bounded voice behavior + concurrency hardening — 2026-08-17
+
+Replaces the `saw_utterance` latch (Build record above, now superseded) with a correlated,
+per-response completion signal, and closes three concurrency gaps found in review.
+
+- **`speak` vs `speak_response` (the arming split):** `VoiceIO` now exposes two seams. Raw
+  `speak()` — startup greeting, session narration, **and background-reasoning pings
+  (`brain.background_done`)** — never arms follow-up: none of these are a reply to something the
+  owner just said, so opening a 10s wake-free window for them would be ambient capture at an
+  unpredictable moment. `speak_response()` — a skill's acknowledgement AND its final reply, a plain
+  Brain answer — arms it, because these ARE direct replies the owner should be able to talk back to.
+- **Per-speech records, not one global flag:** `VoiceIO` tracks a list of `_SpeechRecord`s (one per
+  in-flight/recent `speak`/`speak_response` call) instead of a single `_active_handle` +
+  `_response_active` pair. `is_speaking` stays `True` until EVERY tracked record is idle, so
+  overlapping TTS (e.g. an ack racing its own final reply, or narration racing a response) can never
+  orphan an earlier call's completion.
+- **One-shot response completion, retained until fully idle:** a response's completion arms an
+  internal flag the instant it genuinely finishes (stream `done()` + cooldown elapsed), but
+  `consume_followup_ready()` only surfaces (and clears) it once `is_speaking` would report `False` —
+  an overlapping narration or a second response cannot erase or prematurely expose it. Two
+  overlapping responses collapse to a single follow-up opening (correct — one window is enough).
+- **Overlapping-TTS + failure cleanup:** barge-in stops EVERY tracked handle (not just the most
+  recent) and clears any not-yet-consumed follow-up signal, so a stale completion from before an
+  interruption can't leak into the interrupted turn. A record is registered *before* `tts.speak()`
+  is awaited (so a barge-in or the stall ceiling can invalidate it before its handle exists); if
+  `tts.speak()` raises or is cancelled, the pending record is removed and the mic is never
+  permanently gated; a handle that arrives late (after barge-in or the ceiling already dropped its
+  record) is stopped immediately instead of being adopted or left to play untracked.
+- **Missed-edge handling:** `edith/voice/live.py::_followup_poll` consumes the one-shot signal once
+  per loop poll, but never while the gate action is `"skip"` (still speaking) — it only reads (and
+  the loop only acts on) the signal once the gate is idle, so a response that finishes entirely
+  between polls (the speaking→idle edge itself missed, e.g. during a blocking capture/transcribe)
+  still opens follow-up on the next poll instead of being silently dropped.
+- **Timing:** `VoiceIO`'s speak cooldown is **0.3s** (`_SPEAK_COOLDOWN`, down from 2.5s) and the
+  live loop's post-speech tail flush is **0.3s** (`_SPEAK_FLUSH_SECONDS`, computed via
+  `_frames_for_seconds` with `math.ceil` so 0.3s at 16 kHz/1280-sample frames rounds up to 4 frames,
+  not down to 3). Follow-up window stays **10s** (`EDITH_FOLLOWUP_SECONDS`, unchanged).
+- **VPIO/Speex remains bench-only:** none of the above wires real echo cancellation into the
+  shipped half-duplex loop — `edith/voice/duplex/` (VPIO) and `edith/voice/aec_bench/` (SpeexDSP)
+  are still an isolated comparison bench (see `docs/ENGINEERING-NOTES.md::"The half-duplex mic gate,
+  and the duplex spike"`), not a `run_live_loop` dependency. This fix only tightens the shipping
+  half-duplex gate's timing and correctness.
+- **Files:** `edith/voice/io.py` (`_SpeechRecord`, cooldown, `speak`/`speak_response`,
+  `consume_followup_ready`), `edith/voice/live.py` (`_followup_poll`, `_frames_for_seconds`),
+  `edith/daemon/edithd.py` (`_speak_decision`/`_speak_background` seam wiring).
+- **Verification:** TDD throughout (RED before each production edit) across three fix rounds —
+  overlap/race regressions, pending-record cleanup on exception/cancellation/stall, and the barge-in
+  stale-signal + flush-rounding minors. Full suite + `pyright` + `ruff` clean after each round.

@@ -116,10 +116,10 @@ async def _amain(engine: str) -> int:
             )
         except (TimeoutError, httpx.HTTPError) as exc:
             print(f"[voice] model call failed: {exc}")
-            await voice.speak("Sorry, I couldn't reach the model just now.")
+            await voice.speak_response("Sorry, I couldn't reach the model just now.")
             return
         print(f"[edith] {reply.text!r}")
-        await voice.speak(reply.text)
+        await voice.speak_response(reply.text)
         # Trail the exchange into the buffer AFTER the reply — redact first (STT text
         # flows straight in), matching Brain's never-persist boundary.
         history.add("user", sanitize_text(text))

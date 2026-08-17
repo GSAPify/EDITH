@@ -37,6 +37,8 @@ from edith.menubar.controller import NOT_RUNNING_LABEL, MenuBarController
 _SOCKET_BASENAME = "edithd.sock"
 _DEFAULT_DATA_DIR = "~/.edith/data"
 _POLL_SECONDS = 3
+_NS_APPLICATION = "NSApplication"
+_NS_POLICY_ACCESSORY = "NSApplicationActivationPolicyAccessory"
 
 
 def default_socket_path() -> str:
@@ -74,12 +76,15 @@ def _become_menu_bar_app() -> None:
     harmless no-op.
     """
     try:
-        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+        import AppKit
     except ImportError:  # pyobjc absent — rumps could not have imported either
         return
-    NSApplication.sharedApplication().setActivationPolicy_(
-        NSApplicationActivationPolicyAccessory
-    )
+    try:
+        ns_application = getattr(AppKit, _NS_APPLICATION)
+        policy_accessory = getattr(AppKit, _NS_POLICY_ACCESSORY)
+        ns_application.sharedApplication().setActivationPolicy_(policy_accessory)
+    except AttributeError:
+        return
 
 
 def build_app(socket_path: str | None = None):

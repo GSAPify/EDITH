@@ -71,6 +71,8 @@ include = ["edith", "tests"]
 exclude = [".venv", "**/__pycache__"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

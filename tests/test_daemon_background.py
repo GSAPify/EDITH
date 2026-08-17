@@ -60,9 +60,13 @@ class SpyMemory:
 class FakeVoiceIO:
     def __init__(self) -> None:
         self.spoken: list[str] = []
+        self.response_spoken: list[str] = []
 
     async def speak(self, text: str) -> None:
         self.spoken.append(text)
+
+    async def speak_response(self, text: str) -> None:
+        self.response_spoken.append(text)
 
     def set_paused(self, paused: bool) -> None:
         pass
@@ -96,6 +100,13 @@ async def test_daemon_builds_a_reasoner_and_injects_it_into_brain(data_dir: Path
 
 
 async def test_background_done_is_spoken_via_voice(data_dir: Path) -> None:
+    """A background-reasoning ping is spoken via raw ``speak``, NOT ``speak_response``.
+
+    It fires spontaneously at an unpredictable time (whenever the background job
+    finishes), not as a reply to something the owner just said — arming follow-up here
+    would open a 10s wake-free ambient window out of nowhere. Fail closed: only a
+    direct reply to the owner's own utterance (plain answer, user-triggered skill) may
+    arm follow-up (spec 03 §Follow-up)."""
     voice = FakeVoiceIO()
     daemon = _daemon(data_dir, voice=voice)
     await daemon.start()
@@ -109,6 +120,7 @@ async def test_background_done_is_spoken_via_voice(data_dir: Path) -> None:
         await daemon.stop()
 
     assert voice.spoken == ["the sharding conclusion, sir"]
+    assert not voice.response_spoken
 
 
 async def test_no_background_speak_subscriber_without_voice(data_dir: Path) -> None:
@@ -150,7 +162,7 @@ def test_session_narration_can_be_disabled_from_the_cli() -> None:
     """--no-session-narration must reach EdithDaemon, or wake stays deaf.
 
     Narration blinds the wake word: _gate_action returns "skip" for every frame while
-    is_speaking, plus a 2.5s cooldown after. With several active Claude Code sessions the
+    is_speaking, plus a 0.3s cooldown after. With several active Claude Code sessions the
     Narrator can speak near-continuously and "Hey Edith" is never detected. The toggle was
     hardcoded True with no way to turn it off — same class as --graph-refresh being
     unreachable.

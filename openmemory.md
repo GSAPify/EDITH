@@ -1,6 +1,7 @@
 # EDITH Project Memory Guide
 
 ## Overview
+
 - EDITH is an always-on, local-first, voice-first personal AI assistant for macOS.
 - The production entry point is `python -m edith.daemon`; `launchd` supervises it as `edithd`.
 - Python 3.11+ is managed through `uv`; core metadata and dependencies live in `pyproject.toml`.
@@ -8,6 +9,7 @@
   `.env` fallback and must never be persisted to memory, logs, or tracked files.
 
 ## Architecture
+
 - `edith/daemon/` is the composition root and lifecycle owner. It creates one shared event bus,
   graph-backed memory store, router, guard, voice loop, Brain, skills, session awareness, and the
   unix-socket Control API.
@@ -29,9 +31,11 @@
   `~/.edith/data/edithd.sock`.
 
 ## User Defined Namespaces
+
 - [Leave blank - user populates]
 
 ## Components
+
 - **EdithDaemon** (`edith/daemon/edithd.py`): starts and stops the shared runtime, Control API,
   voice task, session collector, background work, and graph refresh.
 - **Daemon CLI** (`edith/daemon/__main__.py`): resolves runtime configuration and constructs the
@@ -42,16 +46,29 @@
 - **Router / BackgroundReasoner** (`edith/router/`): model selection, streaming, usage metering,
   and asynchronous deep reasoning.
 - **VoiceIO** (`edith/voice/`): live audio input/output and half-duplex conversation control.
+  `speak_response()` marks owner-facing replies so their completed playback opens the follow-up
+  window; ordinary `speak()` is reserved for startup and narration that must not open the mic.
 - **Control API** (`edith/daemon/control.py`, `client.py`): JSON-lines commands over a local unix
   socket for status, pause, resume, and kill.
 - **LaunchAgent** (`deploy/`): sources the secured `.env`, starts the venv daemon, and keeps it
   alive across crashes and login sessions.
 
 ## Patterns
+
 - Keep models, protocols, constants, and shared configuration at module scope; do not define them
   inside functions.
 - Follow existing names and module-local patterns before introducing new functions or files.
 - Use dependency injection and structural protocols for hardware, network, model, and OS seams.
+- Pyright resolves the repository environment through `[tool.pyright]` with `venvPath = "."` and
+  `venv = ".venv"`; Cursor uses `.venv/bin/python` as the workspace interpreter.
+- Keep dynamic PyObjC surfaces localized behind guarded `getattr` or `Any` boundaries rather than
+  suppressing missing-stub diagnostics across a module.
+- Track overlapping TTS calls independently. Follow-up listening opens only after every active
+  speech record is idle and at least one owner-facing response completed; startup, narration,
+  delayed background-reasoning pings, barge-in, cancellation, and abandoned TTS calls do not arm it.
+- The shipping voice path remains half-duplex: a 0.3-second playback cooldown plus a 0.3-second
+  residual tail flush precedes the existing 10-second follow-up window. VPIO/Speex AEC remains
+  benchmark-only.
 - Build behavior test-first; use fakes for hardware/network and reserve real mic, GUI, Apple Events,
   and gateway checks for owner live-smokes.
 - Use `.venv/bin/python -m pytest`, `ruff check edith tests`, and `pyright` for verification.

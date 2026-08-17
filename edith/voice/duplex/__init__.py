@@ -33,6 +33,7 @@ class DuplexAudio(Protocol):
 
     def frames(self) -> Iterator[Any]:
         """Yield cancelled mic frames: 16 kHz mono int16, ``FRAME_SAMPLES`` long."""
+        ...
 
     def play(self, pcm: bytes) -> None:
         """Send TTS audio out. The backend decides how this reaches the canceller."""

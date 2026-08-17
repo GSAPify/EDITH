@@ -63,7 +63,7 @@ def test_default_none_deep_signal_stays_sonnet_but_suggests_background() -> None
 
 
 def test_estimate_tokens_is_roughly_chars_over_four() -> None:
-    msgs = [{"role": "user", "content": "a" * 400}]
+    msgs: list[dict[str, object]] = [{"role": "user", "content": "a" * 400}]
     n = estimate_tokens(msgs)
     assert 80 <= n <= 140  # ~100 tokens for 400 chars
 

@@ -11,7 +11,9 @@ Fake idiom mirrors tests/test_brain_resolve_hook.py.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 
+from edith.memory.store import Node
 from edith.router import ModelResponse, Tier
 from edith.skills import PRReviewSkill
 from edith.skills.base import SkillContext
@@ -32,7 +34,7 @@ class FakeRouter:
 class FakeMemory:
     def __init__(self, recall_hits: list[dict[str, object]] | None = None) -> None:
         self.recall_hits = recall_hits or []
-        self.remembered_nodes: list[object] = []
+        self.remembered_nodes: list[Node] = []
         self.remembered_edges: list[object] = []
 
     def recall(self, query: str) -> list[dict[str, object]]:
@@ -77,7 +79,7 @@ async def _confirm_false(_prompt: str) -> bool:
     return False
 
 
-def _make_speak() -> tuple[list[str], object]:
+def _make_speak() -> tuple[list[str], Callable[[str], Awaitable[None]]]:
     spoken: list[str] = []
 
     async def speak(text: str) -> None:
@@ -184,7 +186,12 @@ async def test_unknown_person_asks_and_makes_no_calls() -> None:
 
 
 async def test_person_without_gh_handle_asks() -> None:
-    hit = {"label": "Person", "id": "person-tavishi", "name": "Tavishi"}  # no gh_handle
+    # no gh_handle on this Person hit
+    hit: dict[str, object] = {
+        "label": "Person",
+        "id": "person-tavishi",
+        "name": "Tavishi",
+    }
     memory = FakeMemory(recall_hits=[hit, _repo_hit()])
     gh = FakeGh({})
     router = FakeRouter()
@@ -287,10 +294,10 @@ async def test_remembers_even_when_not_posted() -> None:
     result = await skill.run(_ctx(memory))
 
     assert result.remembered is True
-    labels = {getattr(n, "label", None) for n in memory.remembered_nodes}
+    labels = {n.label for n in memory.remembered_nodes}
     assert "Person" in labels
     assert "PR" in labels
     assert "Fact" in labels
     # the Person node carries gh_handle so next time is a HIT
-    person = next(n for n in memory.remembered_nodes if getattr(n, "label", None) == "Person")
+    person = next(n for n in memory.remembered_nodes if n.label == "Person")
     assert person.props.get("gh_handle") == "tavishi-gh"
