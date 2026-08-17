@@ -28,7 +28,7 @@ import os
 import threading
 from collections import deque
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol
 
 from edith.bus import EventBus
 from edith.voice.adapters import select_adapter
@@ -46,6 +46,11 @@ _FRAME_SAMPLES = 1280
 _WAKE_MODEL = "hey_jarvis"  # openWakeWord bundles hey_jarvis_v0.1.onnx
 _WAKE_THRESHOLD = 0.5
 _FOLLOWUP_SECONDS = 10.0  # mic stays hot this long after a reply (follow-up, no wake)
+# Residual TTS-tail drain after EDITH stops speaking, before the wake detector resumes.
+# Shipping half-duplex (no VPIO/Speex AEC): kept short now that VoiceIO's own cooldown
+# (see edith.voice.io._SPEAK_COOLDOWN) already absorbs most of the output-buffer hangover.
+# Env-tunable for live calibration (no recompile).
+_SPEAK_FLUSH_SECONDS = 0.3
 # Energy endpointing (replaces the old fixed 5 s capture): end an utterance on
 # trailing silence or a hard cap. Env-tunable for live calibration (no recompile).
 _ENDPOINT_SILENCE_MS = 800.0
@@ -163,8 +168,10 @@ def _blocking_listen(
     # flush the residual TTS tail and RESET the detector (the primary defense —
     # a sub-second leaked fragment can't complete a ~1.5 s wake phrase after a
     # reset). Flush length is env-tunable for the live retest (no recompile).
-    flush_seconds = float(os.environ.get("EDITH_SPEAK_FLUSH_SECONDS", "0.8"))
-    flush_frames = int(_SAMPLE_RATE * flush_seconds / _FRAME_SAMPLES)
+    flush_seconds = float(os.environ.get("EDITH_SPEAK_FLUSH_SECONDS", str(_SPEAK_FLUSH_SECONDS)))
+    flush_frames = _frames_for_seconds(
+        flush_seconds, sample_rate=_SAMPLE_RATE, frame_samples=_FRAME_SAMPLES
+    )
     # Conversation mode: after a reply, accept a follow-up (no wake word) for a
     # window; end each utterance on trailing silence instead of a fixed clock. Both
     # are pure, unit-tested units — this loop only feeds them frames.
@@ -181,10 +188,6 @@ def _blocking_listen(
     preroll_frames = int(os.environ.get("EDITH_PREROLL_FRAMES", str(_PREROLL_FRAMES)))
     preroll: deque[Any] = deque(maxlen=max(0, preroll_frames))
     was_speaking = False
-    # Only a reply to a REAL captured utterance opens the follow-up window — the
-    # startup greeting (and any unsolicited speak) must NOT arm wake-free capture,
-    # or every launch would open ~10s of ambient listening (spec §"Why NOT open-mic").
-    saw_utterance = False
     n_frames, peak = 0, 0.0
     with sd.RawInputStream(
         samplerate=_SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME_SAMPLES
@@ -194,13 +197,19 @@ def _blocking_listen(
             if action == "skip":
                 _read_frame(np, stream)  # keep draining so the input buffer can't overflow
                 continue
-            if action == "flush":
+            # Only a genuinely-finished speak_response() opens the follow-up window — the
+            # startup greeting and session narration (plain speak()) must NOT arm wake-free
+            # capture, or every launch/narration would open ~10s of ambient listening (spec
+            # §"Why NOT open-mic"). Polled (never while "skip" — see _followup_poll) so a
+            # completion between polls (the speaking→idle edge missed entirely — e.g. TTS
+            # finished during a blocking capture/transcribe) still opens follow-up.
+            should_flush, should_open_window = _followup_poll(voice_io, action)
+            if should_flush:
                 for _ in range(flush_frames):
                     _read_frame(np, stream)
                 wake.reset()  # clear accumulated TTS-audio context so it can't spuriously wake
-                if saw_utterance:
-                    window.on_reply_finished()  # a real reply just finished → open follow-up
-                    saw_utterance = False
+                if should_open_window:
+                    window.on_reply_finished()  # a response just finished → open follow-up
                 continue
 
             frame = _read_frame(np, stream)
@@ -248,9 +257,6 @@ def _blocking_listen(
             if not text:
                 continue
             confidence = _confidence(seg_list)
-            # A real utterance is on its way to a reply → its reply may open a
-            # follow-up window (gated in the flush branch above).
-            saw_utterance = True
             # Bridge onto the event loop; _on_wake does barge-in + publish. Attach a
             # done-callback so an exception inside the coroutine is logged, not swallowed.
             fut = asyncio.run_coroutine_threadsafe(
@@ -266,6 +272,16 @@ def _log_future_exc(fut: Any) -> None:
         _log.error("voice: _on_wake failed", exc_info=exc)
 
 
+def _frames_for_seconds(seconds: float, *, sample_rate: int, frame_samples: int) -> int:
+    """Frame count covering at least *seconds* of audio (unit-tested; the loop is not).
+
+    Rounds UP (``math.ceil``), never truncates: at 16 kHz/1280-sample frames, 0.3 s is
+    3.75 frames — truncating to 3 would flush only ~240 ms, short of the configured
+    ``EDITH_SPEAK_FLUSH_SECONDS`` and short-changing the TTS-tail drain it exists for.
+    """
+    return math.ceil(seconds * sample_rate / frame_samples)
+
+
 def _gate_action(is_speaking: bool, was_speaking: bool) -> tuple[str, bool]:
     """Half-duplex mic gate as a pure state machine (unit-tested; the loop is not).
 
@@ -279,6 +295,58 @@ def _gate_action(is_speaking: bool, was_speaking: bool) -> tuple[str, bool]:
     if was_speaking:
         return "flush", False
     return "process", False
+
+
+class FollowupSignalLike(Protocol):
+    """The slice of VoiceIO that ``_followup_poll`` needs (spec 03 §Follow-up).
+
+    Structural — a real ``VoiceIO`` satisfies this without inheriting from it (same
+    pattern as ``edith.daemon.edithd.VoiceIOLike``).
+    """
+
+    @property
+    def is_paused(self) -> bool: ...
+
+    def consume_followup_ready(self) -> bool: ...
+
+
+def _followup_poll(voice_io: FollowupSignalLike, gate_action: str) -> tuple[bool, bool]:
+    """Consume the one-shot response-completion signal for one loop poll, UNLESS EDITH
+    is still speaking (unit-tested; the loop is not).
+
+    Must NOT consume — or even peek — the signal while ``gate_action`` is ``"skip"``:
+    ``VoiceIO.is_speaking`` only marks a response ready once EVERY tracked utterance
+    (including any overlapping narration or a second response) is idle, so while still
+    speaking the signal — if any — is deliberately being retained, not lost. Reading it
+    here anyway would just waste the one-shot read for no benefit. Once the gate is no
+    longer "skip", consume it and combine with the gate action via ``_followup_transition``.
+    """
+    if gate_action == "skip":
+        return False, False
+    response_ready = voice_io.consume_followup_ready()
+    return _followup_transition(gate_action, response_ready, voice_io.is_paused)
+
+
+def _followup_transition(
+    gate_action: str, response_ready: bool, muted: bool
+) -> tuple[bool, bool]:
+    """Pure follow-up decision for one loop poll (unit-tested; the loop is not).
+
+    Combines the half-duplex gate's action with VoiceIO's one-shot response-completion
+    signal (``consume_followup_ready``) so a response that finishes ENTIRELY between polls
+    — the speaking→idle edge missed because the loop was blocked in a capture/transcribe —
+    still opens follow-up, while a narration-only flush (no response armed) never does.
+
+    Returns ``(should_flush, should_open_window)``:
+      - ``should_flush``       — drain the TTS tail + reset the wake detector. True on a
+        normal ``"flush"`` gate action OR whenever a response just completed, even if the
+        gate missed the edge and reports ``"process"``.
+      - ``should_open_window`` — open the follow-up ``ConversationWindow``. True only when
+        a response completed AND the owner is not muted.
+    """
+    should_flush = gate_action == "flush" or response_ready
+    should_open_window = response_ready and not muted
+    return should_flush, should_open_window
 
 
 def _read_frame(np: Any, stream: Any) -> Any:

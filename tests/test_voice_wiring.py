@@ -51,14 +51,22 @@ class SpyMemory:
 
 
 class FakeVoiceIO:
-    """Records speak() and set_paused() calls; zero audio deps."""
+    """Records speak() / speak_response() / set_paused() calls; zero audio deps.
+
+    Tracks raw ``speak()`` and ``speak_response()`` separately so wiring tests can
+    assert WHICH seam a caller used, not merely that something was said.
+    """
 
     def __init__(self) -> None:
         self.spoken: list[str] = []
+        self.response_spoken: list[str] = []
         self.pause_states: list[bool] = []
 
     async def speak(self, text: str) -> None:
         self.spoken.append(text)
+
+    async def speak_response(self, text: str) -> None:
+        self.response_spoken.append(text)
 
     def set_paused(self, paused: bool) -> None:
         self.pause_states.append(paused)
@@ -86,10 +94,12 @@ def _daemon(data_dir: Path, voice: FakeVoiceIO | None = None) -> EdithDaemon:
 
 
 async def test_voice_speak_wired_into_pr_review_skill(data_dir: Path) -> None:
-    """When voice= is wired, PRReviewSkill's speak seam is voice.speak.
+    """When voice= is wired, PRReviewSkill's speak seam is voice.speak_response.
 
-    The unknown-person path calls speak(asked) immediately — no gh, no model
-    call — so voice.spoken is populated after the utterance is dispatched.
+    A user-triggered skill's acknowledgements/replies must re-arm follow-up
+    independently, so it goes through speak_response — never raw speak. The
+    unknown-person path calls speak(asked) immediately — no gh, no model call —
+    so voice.response_spoken is populated after the utterance is dispatched.
     """
     voice = FakeVoiceIO()
     daemon = _daemon(data_dir, voice=voice)
@@ -103,7 +113,8 @@ async def test_voice_speak_wired_into_pr_review_skill(data_dir: Path) -> None:
     finally:
         await daemon.stop()
 
-    assert voice.spoken, "PRReviewSkill did not call voice.speak"
+    assert voice.response_spoken, "PRReviewSkill did not call voice.speak_response"
+    assert not voice.spoken, "PRReviewSkill must not use raw speak"
 
 
 async def test_pause_calls_voice_set_paused_true(data_dir: Path) -> None:
@@ -135,7 +146,8 @@ async def test_resume_calls_voice_set_paused_false(data_dir: Path) -> None:
 
 
 async def test_plain_answer_is_spoken_via_brain_decision(data_dir: Path) -> None:
-    """A non-skill utterance → Brain answers → daemon speaks brain.decision (spec 10)."""
+    """A non-skill utterance → Brain answers → daemon speaks brain.decision via
+    speak_response (spec 10) — a plain answer re-arms follow-up just like a skill reply."""
     voice = FakeVoiceIO()
     daemon = _daemon(data_dir, voice=voice)
     await daemon.start()
@@ -146,7 +158,8 @@ async def test_plain_answer_is_spoken_via_brain_decision(data_dir: Path) -> None
     finally:
         await daemon.stop()
 
-    assert voice.spoken == ["ok"]  # the FakeRouter's answer, spoken exactly once
+    assert voice.response_spoken == ["ok"]  # the FakeRouter's answer, spoken exactly once
+    assert not voice.spoken  # never the raw seam
 
 
 async def test_skill_turn_does_not_double_speak(data_dir: Path) -> None:
@@ -162,8 +175,9 @@ async def test_skill_turn_does_not_double_speak(data_dir: Path) -> None:
     finally:
         await daemon.stop()
 
-    assert voice.spoken, "skill should have spoken (its asked/answer)"
-    assert "ok" not in voice.spoken  # the plain-answer path did NOT also speak
+    assert voice.response_spoken, "skill should have spoken (its asked/answer)"
+    assert "ok" not in voice.response_spoken  # the plain-answer path did NOT also speak
+    assert not voice.spoken  # nor via the raw seam
 
 
 async def test_no_speak_the_decision_subscriber_without_voice(data_dir: Path) -> None:
@@ -197,3 +211,37 @@ async def test_voice_none_leaves_behaviour_unchanged(data_dir: Path) -> None:
 
     assert resp["ok"] is True
     assert resp["status"]["state"] == "running"  # type: ignore[index]
+
+
+async def test_session_narration_is_wired_to_raw_speak_not_response(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session narration must go through voice.speak (raw), never voice.speak_response —
+    an idle-narration transition must not steal a skill/reply's follow-up-arming signal."""
+    import edith.daemon.edithd as edithd_module
+
+    captured: dict[str, object] = {}
+    real_narrator = edithd_module.Narrator
+
+    class SpyNarrator(real_narrator):  # type: ignore[misc, valid-type]
+        def __init__(self, bus, speak, **kwargs) -> None:  # noqa: ANN001, ANN003
+            captured["speak"] = speak
+            super().__init__(bus, speak, **kwargs)
+
+    monkeypatch.setattr(edithd_module, "Narrator", SpyNarrator)
+
+    voice = FakeVoiceIO()
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=SpyMemory(),
+        router=FakeRouter(),
+        voice=voice,
+        enable_session_awareness=True,
+    )
+    await daemon.start()
+    try:
+        assert captured["speak"] == voice.speak
+        assert captured["speak"] != voice.speak_response
+    finally:
+        await daemon.stop()

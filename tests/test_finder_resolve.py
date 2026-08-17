@@ -186,12 +186,12 @@ def test_gh_readme_uses_raw_accept_and_no_jq(monkeypatch) -> None:  # noqa: ANN0
     that stdout is returned verbatim."""
     from edith.finder import resolve as resolve_mod
 
-    captured: dict[str, object] = {}
+    captured: dict[str, list[str]] = {}
 
     class _Result:
         stdout = "# README\n\nadczar analytics."
 
-    def fake_run(args, **kwargs):  # noqa: ANN001, ANN003
+    def fake_run(args: list[str], **kwargs) -> _Result:  # noqa: ANN003
         captured["args"] = args
         return _Result()
 

@@ -148,7 +148,7 @@ async def test_pr_review_skill_registered_and_dispatches(data_dir):
     router = FakeRouter()
     daemon = _daemon(data_dir, SpyMemory(), router)
     await daemon.start()
-    results: list[object] = []
+    results: list[dict[str, object]] = []
 
     async def capture(event) -> None:  # noqa: ANN001
         results.append(event.payload)

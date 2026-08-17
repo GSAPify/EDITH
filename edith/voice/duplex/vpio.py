@@ -98,7 +98,7 @@ class VpioDuplex:
                 "pyobjc-framework-AVFoundation is not installed; VPIO is unavailable"
             ) from exc
 
-        self._av = AVFoundation
+        self._av: Any = AVFoundation
         self._frame_samples = frame_samples
         self._pcm_sample_rate = pcm_sample_rate
         self._closed = False
@@ -109,18 +109,18 @@ class VpioDuplex:
         self._pending: list[NDArray[np.int16]] = []
         self._tail: NDArray[np.int16] = np.zeros(0, dtype=np.int16)
 
-        self._engine = AVFoundation.AVAudioEngine.alloc().init()
+        self._engine = self._av.AVAudioEngine.alloc().init()
         self._input = self._engine.inputNode()
         self._aec_enabled = enable_aec
         enabled, error = self._input.setVoiceProcessingEnabled_error_(enable_aec, None)
         if not enabled and enable_aec:
             raise DuplexUnavailable(f"could not enable Voice Processing I/O: {error}")
 
-        audio_format = AVFoundation.AVAudioFormat.alloc()
+        audio_format = self._av.AVAudioFormat.alloc()
         self._format = audio_format.initStandardFormatWithSampleRate_channels_(
             float(VPIO_SAMPLE_RATE), 1
         )
-        self._player = AVFoundation.AVAudioPlayerNode.alloc().init()
+        self._player = self._av.AVAudioPlayerNode.alloc().init()
         self._engine.attachNode_(self._player)
         # Straight to outputNode. mainMixerNode would impose 44.1 kHz and the engine would
         # refuse to start with -10875.

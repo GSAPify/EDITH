@@ -201,6 +201,7 @@ def test_recalled_facts_ride_the_user_turn_not_the_cached_preamble() -> None:
 
     assert messages[0] == {"role": "system", "content": "PERSONA"}  # byte-stable
     user = messages[1]["content"]
+    assert isinstance(user, str)
     assert "Concode migrates to LangChain XML" in user
     assert "owner prefers tiny diffs" in user
     assert user.endswith("what did we decide?")

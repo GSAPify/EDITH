@@ -34,7 +34,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import keyring
 from keyring.errors import KeyringError
@@ -96,6 +96,8 @@ class VoiceIOLike(Protocol):
     """
 
     async def speak(self, text: str) -> None: ...
+
+    async def speak_response(self, text: str) -> None: ...
 
     def set_paused(self, paused: bool) -> None: ...
 
@@ -239,20 +241,26 @@ class EdithDaemon:
         self._session_bus = SessionBus(self.bus, runtime_state=self.state)
 
         # Register skills so a voice.utterance can dispatch them (spec 02
-        # build-step 3). When VoiceIO is wired, pass its speak seam into
-        # PRReviewSkill so review findings are spoken aloud. Without VoiceIO
-        # the default _silent seam keeps the confirm gate safely denied.
+        # build-step 3). When VoiceIO is wired, pass its speak_response seam into
+        # each user-triggered skill so an acknowledgement AND a final reply each
+        # independently re-arm the follow-up window (spec 03 §Follow-up). Session
+        # narration (below) keeps the raw speak seam instead — see _start_session_
+        # awareness. Without VoiceIO the default _silent seam keeps the confirm
+        # gate safely denied.
         speak = self._voice.speak if self._voice is not None else None
+        speak_response = self._voice.speak_response if self._voice is not None else None
         pr_skill = (
-            PRReviewSkill(self._router, speak=speak)
-            if speak is not None
+            PRReviewSkill(self._router, speak=speak_response)
+            if speak_response is not None
             else PRReviewSkill(self._router)
         )
         # SessionQuerySkill answers "what is session 2 doing?" via Brain dispatch
         # (spec 04 §Step 4). Its state provider is bound to the live SessionBus map.
         session_skill = (
-            SessionQuerySkill(self._session_bus.session_states, router=self._router, speak=speak)
-            if speak is not None
+            SessionQuerySkill(
+                self._session_bus.session_states, router=self._router, speak=speak_response
+            )
+            if speak_response is not None
             else SessionQuerySkill(self._session_bus.session_states, router=self._router)
         )
         # DesktopControlSkill turns "open Spotify" / "start OMC in <repo>" into real OS
@@ -261,8 +269,8 @@ class EdithDaemon:
         # feedback when VoiceIO is wired; the router enables the haiku classify fallback.
         # Guard gates it (spec 11): a denylisted OS verb is refused, spoken, and never run.
         desktop_skill = (
-            DesktopControlSkill(router=self._router, speak=speak, guard=self._guard)
-            if speak is not None
+            DesktopControlSkill(router=self._router, speak=speak_response, guard=self._guard)
+            if speak_response is not None
             else DesktopControlSkill(router=self._router, guard=self._guard)
         )
         # Background reasoner (spec 13): opus deep work that never blocks the live turn. Built
@@ -342,15 +350,25 @@ class EdithDaemon:
         self.state.last_event = "daemon.started"
 
     async def _speak_decision(self, event: Event) -> None:
-        """Speak the plain-answer ``brain.decision`` via VoiceIO (spec 10 §decision 3)."""
+        """Speak the plain-answer ``brain.decision`` via VoiceIO (spec 10 §decision 3).
+
+        Uses speak_response, not raw speak — a plain answer is a reply to the owner's
+        utterance and must re-arm follow-up like any skill's reply (spec 03 §Follow-up).
+        """
         if self._voice is None:
             return
         answer = str(event.payload.get("answer", ""))
         if answer:
-            await self._voice.speak(answer)
+            await self._voice.speak_response(answer)
 
     async def _speak_background(self, event: Event) -> None:
-        """Speak a finished background-reasoning summary (spec 13 §on_done)."""
+        """Speak a finished background-reasoning summary (spec 13 §on_done).
+
+        Uses raw speak, NOT speak_response: this fires spontaneously whenever the
+        background job happens to finish, not as a reply to something the owner just
+        said — arming follow-up here would open a 10s wake-free ambient window at an
+        unpredictable moment. Fail closed (spec 03 §Follow-up).
+        """
         if self._voice is None:
             return
         answer = str(event.payload.get("answer", ""))
@@ -367,6 +385,7 @@ class EdithDaemon:
         until process exit) — clean teardown is process exit, per the Completion Record.
         """
         # optional dep — voice path only
+        from edith.voice.io import VoiceIO
         from edith.voice.live import resolve_wake_model, run_live_loop, wake_phrase
 
         # Resolve the wake model HERE, exactly as edith.voice.__main__ does. Calling
@@ -383,8 +402,8 @@ class EdithDaemon:
         loop = asyncio.get_running_loop()
         self._voice_stop = threading.Event()
         self._voice_task = loop.create_task(
-            run_live_loop(  # type: ignore[arg-type]
-                voice,
+            run_live_loop(
+                cast(VoiceIO, voice),
                 wake_model=wake_model,
                 wake_threshold=wake_threshold,
                 followup_seconds=followup,

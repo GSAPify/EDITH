@@ -60,8 +60,10 @@ def test_metadata_build_omits_summary_and_makes_gh_description_fact() -> None:
     facts = [n for n in nodes if n.label == "Fact"]
     assert len(facts) == 1
     assert facts[0].props["source"] == "gh_description"
-    assert "guardian service" in facts[0].props["text"]
-    assert "security" in facts[0].props["text"]  # topics folded in
+    text = facts[0].props["text"]
+    assert isinstance(text, str)
+    assert "guardian service" in text
+    assert "security" in text  # topics folded in
     assert edges[0].label == "relates_to"
 
 
