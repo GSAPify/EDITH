@@ -16,9 +16,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-# LOCKED status shape (north-star §4.2, edith/daemon/control.py:_status): exactly
-# these four keys. Only state + active_skill feed the title; budget_used and
-# last_event are available on `last_status` for a future menu body / tooltip.
+# LOCKED status shape (north-star §4.2, edith/daemon/control.py:_status): the four
+# original keys, plus the additive `voice_health` (round 2 review). Only state +
+# active_skill feed the title; the rest are available on `last_status` for a
+# future menu body / tooltip. Read via `.get()` below so an additive key is
+# tolerated without a client-side change.
 _STATE_LABELS = {
     "running": "running",
     "paused": "paused",

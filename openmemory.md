@@ -40,9 +40,12 @@
   voice task, session collector, background work, and graph refresh.
 - **Daemon CLI** (`edith/daemon/__main__.py`): resolves runtime configuration and constructs the
   live VoiceIO, VectorMemoryStore, Router, Guard, and EdithDaemon.
-- **Brain** (`edith/brain/loop.py`): consumes utterances, recalls context, dispatches skills, calls
-  the Router, and remembers results.
+- **Brain** (`edith/brain/loop.py`): consumes utterances, uses hybrid graph-plus-vector recall when
+  the store supports it, normalizes recalled node shapes into prompt context, dispatches skills,
+  calls the Router, and remembers results.
 - **MemoryStore / VectorMemoryStore** (`edith/memory/`): durable graph and vector persistence.
+  `VectorMemoryStore.recall_hybrid()` fuses bounded exact graph hits with semantic Fact hits for
+  conversational Brain turns while preserving Finder's independent ranking behavior.
 - **Router / BackgroundReasoner** (`edith/router/`): model selection, streaming, usage metering,
   and asynchronous deep reasoning.
 - **VoiceIO** (`edith/voice/`): live audio input/output and half-duplex conversation control.
@@ -69,6 +72,11 @@
 - The shipping voice path remains half-duplex: a 0.3-second playback cooldown plus a 0.3-second
   residual tail flush precedes the existing 10-second follow-up window. VPIO/Speex AEC remains
   benchmark-only.
+- CoreAudio/PortAudio input failures close and reopen the mic stream after an interruptible bounded
+  delay. TTS output sinks close on every exit path, and `EDITH_INPUT_DEVICE` /
+  `EDITH_OUTPUT_DEVICE` provide explicit device overrides without changing defaults.
+- Unexpected voice-task failure is surfaced as `voice.failed` through Control API status; later
+  daemon shutdown must still complete Memory, socket, and store cleanup.
 - Build behavior test-first; use fakes for hardware/network and reserve real mic, GUI, Apple Events,
   and gateway checks for owner live-smokes.
 - Use `.venv/bin/python -m pytest`, `ruff check edith tests`, and `pyright` for verification.

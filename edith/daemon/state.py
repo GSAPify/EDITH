@@ -26,6 +26,18 @@ class DaemonState(Enum):
     STOPPING = "stopping"
 
 
+class VoiceHealth(Enum):
+    """Sticky voice-loop health, surfaced via Control API ``status`` (round 2 review).
+
+    Deliberately a DEDICATED field, not derived from ``last_event``: session-narration
+    and graph-refresh writes to ``last_event`` are frequent and unrelated, and would
+    otherwise silently clear a genuine voice failure the moment either fired next.
+    """
+
+    HEALTHY = "healthy"
+    FAILED = "failed"
+
+
 class RuntimeState:
     """Mutable daemon state. Starts RUNNING; kill is terminal."""
 
@@ -33,6 +45,23 @@ class RuntimeState:
         self.state: DaemonState = DaemonState.RUNNING
         self.active_skill: str | None = None
         self.last_event: str | None = None
+        # Sticky voice-loop health (round 2 review): starts HEALTHY even when voice is
+        # never wired/enabled — it is only meaningful once EdithDaemon actually starts
+        # the live loop, which resets it HEALTHY on every start (see mark_voice_healthy).
+        self.voice_health: VoiceHealth = VoiceHealth.HEALTHY
+
+    def mark_voice_healthy(self) -> None:
+        """Reset voice health to HEALTHY — called when the live voice loop (re)starts."""
+        self.voice_health = VoiceHealth.HEALTHY
+
+    def mark_voice_failed(self) -> None:
+        """Mark voice health FAILED — called once, on an unexpected voice-loop exception.
+
+        Sticky: nothing else in this class clears it, so it survives unrelated
+        ``last_event`` writes (session narration, graph refresh) until the loop
+        genuinely restarts.
+        """
+        self.voice_health = VoiceHealth.FAILED
 
     @property
     def is_paused(self) -> bool:

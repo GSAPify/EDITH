@@ -27,6 +27,8 @@ leaving the vector store behind the graph.
 
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
 import struct
 from pathlib import Path
@@ -37,10 +39,82 @@ from edith.memory.embeddings import Embedder, LocalEmbedder
 from edith.memory.secrets import sanitize_text
 from edith.memory.store import Edge, MemoryStore, Node, sanitize_node
 
+_log = logging.getLogger(__name__)
+
 
 def _pack(vector: list[float]) -> bytes:
     """Pack a float vector into sqlite-vec's little-endian float32 blob format."""
     return struct.pack(f"{len(vector)}f", *vector)
+
+
+def _hit_key(hit: dict[str, object]) -> tuple[str, str]:
+    return (str(hit.get("label", "")), str(hit.get("id", "")))
+
+
+def _tag_hit(hit: dict[str, object], source: str) -> dict[str, object]:
+    """Copy ``hit`` with a private ``_recall_source`` tag — never mutate the source dict."""
+    tagged = dict(hit)
+    tagged["_recall_source"] = source
+    return tagged
+
+
+def _fuse_recall_hits(
+    graph_hits: list[dict[str, object]],
+    semantic_hits: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Dedupe-fuse graph + semantic hits by ``(label, id)``.
+
+    Graph/exact hits ride first, in ``recall``'s own order; semantic-only hits follow,
+    in ``semantic_recall``'s distance order. A hit present in both signals is emitted
+    once, at its graph position, tagged ``"graph+semantic"``; a hit from only one
+    signal keeps that signal's tag (``"graph"`` or ``"semantic"``). Every emitted dict
+    is a fresh copy — the source hits from ``recall``/``semantic_recall`` are untouched.
+    """
+    fused: list[dict[str, object]] = []
+    index_by_key: dict[tuple[str, str], int] = {}
+
+    for hit in graph_hits:
+        index_by_key[_hit_key(hit)] = len(fused)
+        fused.append(_tag_hit(hit, "graph"))
+
+    for hit in semantic_hits:
+        key = _hit_key(hit)
+        existing_index = index_by_key.get(key)
+        if existing_index is not None:
+            fused[existing_index]["_recall_source"] = "graph+semantic"
+            continue
+        index_by_key[key] = len(fused)
+        fused.append(_tag_hit(hit, "semantic"))
+
+    return fused
+
+
+def _log_recall_hybrid_debug(
+    graph_hits: list[dict[str, object]],
+    semantic_hits: list[dict[str, object]],
+    total: int,
+) -> None:
+    """Debug-only (``EDITH_MEMORY_DEBUG=1``, default off): counts + ids + distances ONLY.
+
+    Never touches hit text/name/path/remote/summary — those are the owner's own data
+    (or, pre-sanitize, a planted secret) and have no business in a debug log.
+    """
+    if os.environ.get("EDITH_MEMORY_DEBUG") != "1":
+        return
+    graph_ids = [str(h.get("id", "")) for h in graph_hits]
+    semantic_ids = [str(h.get("id", "")) for h in semantic_hits]
+    distances = [
+        h["distance"] for h in semantic_hits if isinstance(h.get("distance"), (int, float))
+    ]
+    _log.debug(
+        "recall_hybrid: total=%d graph=%d semantic=%d graph_ids=%s semantic_ids=%s distances=%s",
+        total,
+        len(graph_hits),
+        len(semantic_hits),
+        graph_ids,
+        semantic_ids,
+        distances,
+    )
 
 
 class VectorMemoryStore(MemoryStore):
@@ -224,6 +298,26 @@ class VectorMemoryStore(MemoryStore):
             {"label": "Fact", "id": str(fact_id), "text": text, "distance": float(dist)}
             for _rowid, fact_id, text, dist in rows
         ]
+
+    def recall_hybrid(self, query: str, k: int = 5) -> list[dict[str, object]]:
+        """Fuse graph recall (structural, exact) with semantic recall (embedding KNN).
+
+        Additive to ``recall``/``semantic_recall`` — Finder already fuses those two
+        itself and must not change. This is the Brain-facing fix: conv/think Facts
+        (spec 13) carry no graph edges, so the graph-only ``recall`` Brain used to call
+        misses them, and Repo/Project/Person/Owner-shaped graph hits have no
+        embedding, so ``semantic_recall`` alone misses THEM. Bounded at ``k`` graph
+        hits + ``k`` semantic hits (2k before dedup); see ``_fuse_recall_hits`` for the
+        ordering/dedup contract. ``k<=0`` returns empty and does no embedding or
+        query work at all.
+        """
+        if k <= 0:
+            return []
+        graph_hits = super().recall(query)[:k]
+        semantic_hits = self.semantic_recall(query, k=k)[:k]
+        fused = _fuse_recall_hits(graph_hits, semantic_hits)
+        _log_recall_hybrid_debug(graph_hits, semantic_hits, len(fused))
+        return fused
 
     def close(self) -> None:
         """Close the sqlite-vec connection, then the Kuzu graph store."""

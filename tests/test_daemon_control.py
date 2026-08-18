@@ -7,7 +7,7 @@ Asserted behaviors (task TDD list):
   - pause -> status shows "paused"; resume -> "running",
   - unknown cmd -> structured error {"ok": false, ...},
   - status returns the LOCKED shape exactly: {state, active_skill, budget_used,
-    last_event} — exact key set, not just presence,
+    last_event, voice_health} — exact key set, not just presence,
   - the socket file perms are 0600,
   - kill flips state to "stopping",
   - budget_used comes from the injected BudgetView (0 until Guard lands).
@@ -71,12 +71,16 @@ async def test_status_returns_locked_shape(sock_path):
 
     assert resp["ok"] is True
     status = cast(dict[str, object], resp["status"])
-    # LOCKED shape — exact key set, nothing more, nothing less.
-    assert set(status) == {"state", "active_skill", "budget_used", "last_event"}
+    # LOCKED shape — exact key set, nothing more, nothing less (plus the additive
+    # voice_health, round 2 review).
+    assert set(status) == {
+        "state", "active_skill", "budget_used", "last_event", "voice_health",
+    }
     assert status["state"] == "running"
     assert status["active_skill"] == "pr-review"
     assert status["last_event"] == "brain.decision"
     assert status["budget_used"] == 0
+    assert status["voice_health"] == "healthy"
 
 
 async def test_pause_then_status_shows_paused(sock_path):

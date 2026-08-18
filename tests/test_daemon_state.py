@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from edith.daemon.state import DaemonState, RuntimeState
+from edith.daemon.state import DaemonState, RuntimeState, VoiceHealth
 
 
 def test_initial_state_is_running():
@@ -22,6 +22,7 @@ def test_initial_state_is_running():
     assert state.is_paused is False
     assert state.active_skill is None
     assert state.last_event is None
+    assert state.voice_health is VoiceHealth.HEALTHY
 
 
 def test_state_values_serialize_lowercase():
@@ -89,3 +90,41 @@ def test_active_skill_and_last_event_are_mutable_labels():
     state.last_event = "brain.decision"
     assert state.active_skill == "pr-review"
     assert state.last_event == "brain.decision"
+
+
+# ---------------------------------------------------------------------------
+# voice_health — sticky voice-loop health (round 2 review). A DEDICATED field
+# (not derived from last_event), so unrelated last_event writes never clear it.
+# ---------------------------------------------------------------------------
+
+
+def test_mark_voice_failed_sets_failed():
+    state = RuntimeState()
+    state.mark_voice_failed()
+    assert state.voice_health is VoiceHealth.FAILED
+
+
+def test_mark_voice_healthy_resets_to_healthy():
+    state = RuntimeState()
+    state.mark_voice_failed()
+    state.mark_voice_healthy()
+    assert state.voice_health is VoiceHealth.HEALTHY
+
+
+def test_voice_health_survives_last_event_writes():
+    """last_event churns constantly (session narration, graph refresh) — it must
+    never clear a sticky voice failure as a side effect."""
+    state = RuntimeState()
+    state.mark_voice_failed()
+    state.last_event = "graph_refresh.started"
+    assert state.voice_health is VoiceHealth.FAILED
+    state.last_event = "graph_refresh.done"
+    assert state.voice_health is VoiceHealth.FAILED
+    state.active_skill = "pr-review"
+    assert state.voice_health is VoiceHealth.FAILED
+
+
+def test_voice_health_values_serialize_lowercase():
+    # status surfaces these strings to the menu-bar/Control API.
+    assert VoiceHealth.HEALTHY.value == "healthy"
+    assert VoiceHealth.FAILED.value == "failed"

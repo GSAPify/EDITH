@@ -26,12 +26,13 @@ import logging
 import math
 import os
 import threading
+import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from edith.bus import EventBus
-from edith.voice.adapters import select_adapter
+from edith.voice.adapters import resolve_device_override, select_adapter
 from edith.voice.conversation import ConversationWindow
 from edith.voice.endpointing import Endpointer
 from edith.voice.io import VoiceIO
@@ -59,6 +60,22 @@ _ENDPOINT_THRESHOLD = 500.0  # RMS onset/silence threshold — CALIBRATE via EDI
 # Frames retained before a trigger so a word's quiet onset is not clipped. 4 x 80 ms = 320 ms,
 # comfortably longer than the 100-300 ms a word takes to ramp past the threshold.
 _PREROLL_FRAMES = 4
+# Bounded delay between PortAudio reopen attempts after a CoreAudio/PortAudio error (e.g.
+# "PaMacCore (AUHAL) err=-50" on a Bluetooth profile renegotiation). Env-tunable so a live
+# retest never needs a recompile; kept short so a transient device hiccup recovers fast.
+_AUDIO_RETRY_SECONDS = 1.0
+# Consecutive-failure ceiling before _run_recoverable gives up and re-raises (round 2
+# review): without this, a permanently missing/bad input device retried forever, the
+# voice task never exited, and _on_voice_task_done could never mark the sticky failure.
+# Env-tunable; the counter only resets after a genuinely healthy run — see
+# _AUDIO_HEALTHY_SECONDS and _run_recoverable's docstring.
+_AUDIO_MAX_RETRIES = 5
+# Minimum time a reopened stream must stay operational (successful open through a
+# subsequent failure/return) before that failure is treated as the start of a FRESH
+# streak rather than a continuation of the current one (round 3 review). Without this,
+# an open-succeeds/read-immediately-fails cycle reset the counter to zero on every
+# single attempt — evading the ceiling entirely, since it never accumulated past one.
+_AUDIO_HEALTHY_SECONDS = 1.0
 
 
 def resolve_wake_model() -> str:
@@ -77,6 +94,58 @@ def wake_phrase(model: str) -> str:
     stem = os.path.basename(model).split(".")[0]  # /x/hey_edith.onnx -> hey_edith
     stem = stem.split("_v")[0]  # hey_jarvis_v0.1 -> hey_jarvis
     return stem.replace("_", " ").replace("-", " ").title()
+
+
+def resolve_audio_retry_seconds() -> float:
+    """Bounded delay between PortAudio reopen attempts; ``EDITH_AUDIO_RETRY_SECONDS``
+    overrides the default (CoreAudio/PortAudio resilience fix).
+
+    ``float()`` parses ``"nan"``/``"inf"``/``"-inf"`` without raising, so those — plus
+    any negative value, which would make the retry wait meaningless or invert it — are
+    rejected explicitly via ``math.isfinite`` and a non-negative check, falling back to
+    the default like any other malformed value. Zero is a valid (immediate-retry) delay.
+    """
+    raw = os.environ.get("EDITH_AUDIO_RETRY_SECONDS")
+    if not raw:
+        return _AUDIO_RETRY_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _AUDIO_RETRY_SECONDS
+    if not math.isfinite(value) or value < 0:
+        return _AUDIO_RETRY_SECONDS
+    return value
+
+
+def resolve_audio_max_retries() -> int:
+    """Consecutive-failure ceiling for ``_run_recoverable``; ``EDITH_AUDIO_MAX_RETRIES``
+    overrides the default (round 2 review — bounds the previously-unbounded retry loop).
+
+    ``int()`` already rejects non-integer strings (``"3.5"``, ``"nan"``, ``"inf"``) by
+    raising ``ValueError``, so only an explicit ``value < 1`` check is needed on top of
+    that to reject zero/negative — both would make the ceiling meaningless (zero
+    attempts, or never escalating). Any malformed, zero, or negative value falls back
+    to the default rather than disabling the ceiling.
+    """
+    raw = os.environ.get("EDITH_AUDIO_MAX_RETRIES")
+    if not raw:
+        return _AUDIO_MAX_RETRIES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _AUDIO_MAX_RETRIES
+    if value < 1:
+        return _AUDIO_MAX_RETRIES
+    return value
+
+
+def resolve_input_device() -> int | str | None:
+    """``EDITH_INPUT_DEVICE`` override for ``sounddevice.RawInputStream``.
+
+    Shares its parsing (``resolve_device_override``) with the output-side override
+    in ``edith.voice.adapters`` so both env knobs behave identically.
+    """
+    return resolve_device_override(os.environ.get("EDITH_INPUT_DEVICE"))
 
 
 def build_tts_adapter(
@@ -140,6 +209,121 @@ async def run_live_loop(
     )
 
 
+def _open_input_stream(sd_module: Any, device: int | str | None) -> Any:
+    """Open the real ``RawInputStream`` via the injected sounddevice module.
+
+    A thin seam around the constructor so ``_run_recoverable`` is unit-testable
+    with a fake stream factory — no hardware.
+    """
+    return sd_module.RawInputStream(
+        samplerate=_SAMPLE_RATE,
+        channels=1,
+        dtype="int16",
+        blocksize=_FRAME_SAMPLES,
+        device=device,
+    )
+
+
+def _sleep_wait(seconds: float) -> bool:
+    """Fallback interruptible-wait when no ``stop`` event was supplied.
+
+    Only reachable when a caller runs the recovery loop with ``stop=None`` — real
+    callers always pass ``threading.Event.wait`` (bound method), which returns True
+    the moment the event is set, interrupting the retry delay promptly.
+    """
+    time.sleep(seconds)
+    return False
+
+
+def _run_recoverable(
+    open_stream: Callable[[], Any],
+    listen: Callable[[Any], None],
+    *,
+    reset: Callable[[], None],
+    error_types: tuple[type[BaseException], ...],
+    wait: Callable[[float], bool],
+    retry_seconds: float,
+    stop: threading.Event | None = None,
+    max_retries: int = _AUDIO_MAX_RETRIES,
+    healthy_seconds: float = _AUDIO_HEALTHY_SECONDS,
+    now: Callable[[], float] = time.monotonic,
+) -> None:
+    """Open + run an input stream, recovering from *error_types* (bounded PortAudio
+    resilience fix — spec 10 review, round 2 review, round 3 review).
+
+    A raised error — while *open_stream* is opening OR while *listen* is reading —
+    is never silently converted into endless zero frames: the failed context is
+    closed (the ``with`` block below), *reset* clears wake/conversation/preroll/gate
+    state fail-closed, then *wait* gets a bounded chance to be interrupted (e.g.
+    ``threading.Event.wait``, which returns True the instant *stop* is set) before
+    the stream is genuinely reopened via *open_stream* again.
+
+    Unit-tested with fakes only (no hardware, no real sleeps — see
+    ``test_voice_live_recovery.py``); the real caller (``_blocking_listen``) supplies
+    ``sd.RawInputStream`` + ``sd.PortAudioError``, and *now* defaults to
+    ``time.monotonic`` (injectable so tests can fake elapsed time deterministically).
+
+    *listen* returning normally only happens once *stop* is set (its own loop ends
+    on that condition), so this returns immediately rather than retrying.
+
+    **Consecutive-failure ceiling** (round 2 review, corrected round 3): without a
+    bound, a permanently missing/bad input device retried forever — the voice task
+    never exited, so its failure could never surface via ``_on_voice_task_done``/
+    sticky voice health. Once *max_retries* consecutive failures are reached, the
+    triggering error is RE-RAISED (no further reset/wait) so the caller sees it.
+    *stop* being set during the wait still exits immediately (no raise), same as
+    before the ceiling existed.
+
+    **Round 3 correction — a successful open is NOT healthy by itself.** The
+    original round 2 design reset the counter the instant *open_stream* returned,
+    before *listen* had run at all — an open-succeeds/read-immediately-fails cycle
+    therefore reset to zero on every single attempt and could never accumulate past
+    one, evading the ceiling entirely for a device that opens fine but can never
+    actually be read. The open time is recorded only after context ENTRY (i.e. once
+    *open_stream* has genuinely succeeded), and on the next failure — whether from
+    that same *open_stream* raising again, or from *listen* — the counter resets to
+    a fresh streak (this failure becomes attempt 1) ONLY if the stream stayed
+    operational for at least *healthy_seconds* since that open. An immediate failure
+    (elapsed < *healthy_seconds*) instead continues the existing streak, so it
+    genuinely accumulates toward *max_retries* and escalates deterministically.
+    """
+    consecutive_failures = 0
+    open_time: float | None = None
+    while stop is None or not stop.is_set():
+        try:
+            with open_stream() as stream:
+                open_time = now()  # recorded only after context entry — see docstring
+                listen(stream)
+            return
+        except error_types as exc:
+            if open_time is not None and (now() - open_time) >= healthy_seconds:
+                consecutive_failures = 0  # stayed operational long enough — fresh streak
+            open_time = None
+            consecutive_failures += 1
+            if consecutive_failures >= max_retries:
+                _log.error(
+                    "voice: input stream failed %d consecutive times "
+                    "(>= EDITH_AUDIO_MAX_RETRIES=%d) — giving up: %s: %s",
+                    consecutive_failures,
+                    max_retries,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
+            _log.warning(
+                "voice: input stream error (%s: %s) — resetting and reopening in "
+                "%.1fs (attempt %d/%d)",
+                type(exc).__name__,
+                exc,
+                retry_seconds,
+                consecutive_failures,
+                max_retries,
+            )
+            reset()
+            if wait(retry_seconds):
+                return
+
+
 def _blocking_listen(
     voice_io: VoiceIO,
     loop: asyncio.AbstractEventLoop,
@@ -152,7 +336,10 @@ def _blocking_listen(
     """The blocking mic loop — runs in a worker thread (heavy imports here).
 
     Returns when *stop* is set, which exits the ``RawInputStream`` context and closes
-    the PortAudio stream before the interpreter tears down (see ``run_live_loop``).
+    the PortAudio stream before the interpreter tears down (see ``run_live_loop``). A
+    ``sounddevice.PortAudioError`` while opening or reading the stream (e.g. a Bluetooth
+    headset's CoreAudio profile renegotiation) does not kill the loop — see
+    ``_run_recoverable``, which reopens after a bounded retry delay.
     """
     import numpy as np
     import sounddevice as sd
@@ -187,11 +374,27 @@ def _blocking_listen(
     # (which ramp up below the threshold) are not lost. See _capture_endpointed.
     preroll_frames = int(os.environ.get("EDITH_PREROLL_FRAMES", str(_PREROLL_FRAMES)))
     preroll: deque[Any] = deque(maxlen=max(0, preroll_frames))
-    was_speaking = False
-    n_frames, peak = 0, 0.0
-    with sd.RawInputStream(
-        samplerate=_SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME_SAMPLES
-    ) as stream:
+
+    input_device = resolve_input_device()
+    if debug and input_device is not None:
+        _log.info("voice: input device override = %r", input_device)
+
+    def reset_state() -> None:
+        """Fail-closed reset after a stream error: wake/conversation/preroll state is
+        cleared so a leaked frame from the failed stream can't spuriously complete
+        anything once the new stream opens. The half-duplex gate's own state
+        (``was_speaking``) resets itself — see ``listen`` below, which reinitialises
+        it on every call."""
+        wake.reset()
+        window.reset()
+        preroll.clear()
+
+    def open_stream() -> Any:
+        return _open_input_stream(sd, input_device)
+
+    def listen(stream: Any) -> None:
+        was_speaking = False
+        n_frames, peak = 0, 0.0
         while stop is None or not stop.is_set():
             action, was_speaking = _gate_action(voice_io.is_speaking, was_speaking)
             if action == "skip":
@@ -263,6 +466,17 @@ def _blocking_listen(
                 voice_io._on_wake(text, confidence), loop  # noqa: SLF001
             )
             fut.add_done_callback(_log_future_exc)
+
+    _run_recoverable(
+        open_stream,
+        listen,
+        reset=reset_state,
+        error_types=(sd.PortAudioError,),
+        wait=stop.wait if stop is not None else _sleep_wait,
+        retry_seconds=resolve_audio_retry_seconds(),
+        stop=stop,
+        max_retries=resolve_audio_max_retries(),
+    )
 
 
 def _log_future_exc(fut: Any) -> None:

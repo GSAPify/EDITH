@@ -27,6 +27,7 @@ template and the Completion Record.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 import subprocess
@@ -57,6 +58,8 @@ from edith.session.collector import TranscriptCollector
 from edith.session.narrator import Narrator
 from edith.skills import DesktopControlSkill, PRReviewSkill, SessionQuerySkill
 from edith.voice.persona import VOICE_PERSONA
+
+_log = logging.getLogger(__name__)
 
 _KEYRING_SERVICE = "edithd"
 _SOCKET_NAME = "edithd.sock"
@@ -399,6 +402,9 @@ class EdithDaemon:
         print(f"[edithd] wake model: {wake_model}  (threshold {wake_threshold}) — "
               f"say '{wake_phrase(wake_model)}, …'", flush=True)
 
+        # Sticky voice health (round 2 review): reset HEALTHY on every (re)start so a
+        # health flag from a previous run can never linger past a fresh loop start.
+        self.state.mark_voice_healthy()
         loop = asyncio.get_running_loop()
         self._voice_stop = threading.Event()
         self._voice_task = loop.create_task(
@@ -410,6 +416,32 @@ class EdithDaemon:
                 stop=self._voice_stop,
             )
         )
+        self._voice_task.add_done_callback(self._on_voice_task_done)
+
+    def _on_voice_task_done(self, task: asyncio.Task[None]) -> None:
+        """Make the voice loop's failure OBSERVABLE (bounded resilience fix).
+
+        Bounded PortAudio recovery lives inside the audio loop itself (see
+        ``edith.voice.live._run_recoverable``), so a task ending here means either a
+        cooperative stop (cancelled/normal completion — stay silent) or a genuinely
+        unexpected exception.         Never auto-respawn for the latter: a respawn loop for an
+        arbitrary programming exception is a different, riskier behavior than the
+        bounded PortAudio retry already living in the audio loop. Logging once and
+        setting ``last_event`` instead makes voice.failed visible over the Control API
+        while the daemon itself stays up. ``mark_voice_failed()`` additionally sets the
+        STICKY ``voice_health`` field (round 2 review) — unlike ``last_event``, which
+        session narration and graph refresh overwrite constantly, this stays FAILED
+        until the loop genuinely restarts, so a degraded voice path cannot be masked by
+        the next unrelated ``last_event`` write.
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        _log.error("voice: live loop failed", exc_info=exc)
+        self.state.last_event = "voice.failed"
+        self.state.mark_voice_failed()
 
     def _make_default_resolver(self, store: MemoryStore) -> ResolveRepoLike:
         """A ``resolve_repo``-shaped closure bound to this daemon's store+router.
@@ -606,6 +638,19 @@ class EdithDaemon:
                 await asyncio.wait_for(voice_task, _VOICE_SHUTDOWN_JOIN_TIMEOUT)
             except (TimeoutError, asyncio.CancelledError):
                 voice_task.cancel()
+            except Exception as exc:  # noqa: BLE001 - see docstring below
+                # An already-failed voice_task re-raises its exception here on await —
+                # _on_voice_task_done already reported it once (spec 10 review). Re-raising
+                # would abort Memory/Kuzu close, the reasoner, SecureStore, and Control API
+                # teardown below and skip _stopped.set(), breaking the degraded-but-
+                # manageable voice-failure contract. Deliberately NOT BaseException: a
+                # CancelledError here (this coroutine's own cancellation, or the voice
+                # task's) must keep propagating via the except clause above.
+                _log.debug(
+                    "voice: shutdown join observed the already-reported failure (%s: %s)",
+                    type(exc).__name__,
+                    exc,
+                )
         # Cancel the graph-refresh loop (spec 08 item 4): stops it from starting another
         # cycle. This does NOT stop an already-running worker thread (asyncio.to_thread
         # can't interrupt one) — join it below, BEFORE compact()/close() touch the same

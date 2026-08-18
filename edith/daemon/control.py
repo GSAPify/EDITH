@@ -4,7 +4,8 @@ The menu-bar app (and tests) send one JSON object per line — ``{"cmd": "..."}`
 and read one JSON object back: ``{"ok": true, ...}`` on success or
 ``{"ok": false, "error": "..."}`` on failure. The four locked commands are
 ``pause`` / ``resume`` / ``kill`` / ``status``; ``status`` returns the LOCKED
-shape ``{state, active_skill, budget_used, last_event}``.
+shape ``{state, active_skill, budget_used, last_event}`` plus the additive
+``voice_health`` (round 2 review — sticky voice-loop health).
 
 This is socket-only by construction — ``asyncio.start_unix_server`` binds a
 filesystem path, never a TCP port (north-star §4.2: "socket only, NEVER a public
@@ -138,10 +139,13 @@ class ControlServer:
         return {"ok": True}
 
     def _status(self) -> dict[str, object]:
-        # LOCKED shape (north-star §4.2): exactly these four keys.
+        # LOCKED shape (north-star §4.2): the original four keys, plus the additive
+        # ``voice_health`` (round 2 review) — existing clients read specific keys via
+        # ``.get()`` and tolerate the extra one; see edith/menubar/controller.py.
         return {
             "state": self._state.state.value,
             "active_skill": self._state.active_skill,
             "budget_used": self._budget.budget_used(),
             "last_event": self._state.last_event,
+            "voice_health": self._state.voice_health.value,
         }
