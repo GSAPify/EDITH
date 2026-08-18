@@ -238,20 +238,25 @@ def test_recall_hybrid_debug_is_off_by_default(tmp_path, embedder: Embedder, mon
     assert caplog.text == ""
 
 
-def test_recall_hybrid_debug_logs_only_counts_ids_and_distances(
+def test_recall_hybrid_debug_logs_only_counts_and_distances_never_ids(
     tmp_path, embedder: Embedder, monkeypatch, caplog
 ):
+    # round 4 review: ids are owner-derived and not guaranteed secret-free —
+    # sanitize_node sanitizes only properties, while ingestion derives ids directly
+    # from person/project names (edith/ingest/graph_map.py:41-48). A secret-shaped id
+    # must never reach the debug log; only counts + numeric distances may.
     monkeypatch.setenv("EDITH_MEMORY_DEBUG", "1")
     marker = "zz-do-not-log-this-fact-text-9182"
+    secret_id = "GOCSPX-EXAMPLE_FAKE_SECRET_ID_DO_NOT_LOG"
     store = VectorMemoryStore(tmp_path / "mem.kuzu", embedder=embedder)
-    store.remember(nodes=[Node("Fact", "f1", {"text": f"onboarding notes: {marker}"})])
+    store.remember(nodes=[Node("Fact", secret_id, {"text": f"onboarding notes: {marker}"})])
 
     with caplog.at_level(logging.DEBUG, logger="edith.memory.vector"):
         hits = store.recall_hybrid("onboarding notes", k=3)
 
-    assert any(h["id"] == "f1" for h in hits)
+    assert any(h["id"] == secret_id for h in hits)
     assert marker not in caplog.text  # recalled TEXT never reaches the debug log
-    assert "f1" in caplog.text  # ids are allowed
+    assert secret_id not in caplog.text  # nor does the (possibly secret-shaped) id
     assert "total=" in caplog.text
     assert "graph=" in caplog.text
     assert "semantic=" in caplog.text

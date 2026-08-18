@@ -116,6 +116,22 @@ async def test_status_over_socket_after_startup(data_dir):
     assert resp["ok"] is True
     status = cast(dict[str, object], resp["status"])
     assert status["state"] == "running"
+    # LOCKED shape — exactly the original four keys; voice_health moved to the
+    # opt-in `status_v2` command (round 4 review) — see test_status_v2_over_socket_*.
+    assert set(status) == {"state", "active_skill", "budget_used", "last_event"}
+
+
+async def test_status_v2_over_socket_after_startup(data_dir):
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+    await daemon.start()
+    try:
+        resp = await ControlClient(daemon.socket_path).send({"cmd": "status_v2"})
+    finally:
+        await daemon.stop()
+
+    assert resp["ok"] is True
+    status = cast(dict[str, object], resp["status"])
+    assert status["state"] == "running"
     assert set(status) == {
         "state", "active_skill", "budget_used", "last_event", "voice_health",
     }
@@ -636,7 +652,7 @@ async def test_voice_health_stays_failed_after_unrelated_last_event_writes(data_
     assert daemon.state.voice_health is VoiceHealth.FAILED
 
 
-async def test_status_over_socket_surfaces_voice_health_after_failure(data_dir):
+async def test_status_v2_over_socket_surfaces_voice_health_after_failure(data_dir):
     daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
     await daemon.start()
     try:
@@ -648,7 +664,7 @@ async def test_status_over_socket_surfaces_voice_health_after_failure(data_dir):
             await task
         daemon._on_voice_task_done(task)  # noqa: SLF001
 
-        resp = await ControlClient(daemon.socket_path).send({"cmd": "status"})
+        resp = await ControlClient(daemon.socket_path).send({"cmd": "status_v2"})
     finally:
         await daemon.stop()
 

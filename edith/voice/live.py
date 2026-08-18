@@ -266,6 +266,16 @@ def _run_recoverable(
     *listen* returning normally only happens once *stop* is set (its own loop ends
     on that condition), so this returns immediately rather than retrying.
 
+    **Cooperative shutdown wins the race with the terminal attempt (round 4 review).**
+    A shutdown can set *stop* while *open_stream*/*listen* is blocked, and that blocked
+    call can then itself raise the final PortAudio error as the socket/stream tears
+    down underneath it. ``stop.is_set()`` is checked FIRST inside the ``except`` clause —
+    before the healthy-reset check, before incrementing ``consecutive_failures``, before
+    the ceiling comparison, and before any logging — so a stop landing on what would
+    otherwise be the ceiling-triggering attempt returns cleanly with no raise, exactly
+    like the existing *wait*-returns-``True`` path, instead of being misclassified as a
+    genuine voice failure.
+
     **Consecutive-failure ceiling** (round 2 review, corrected round 3): without a
     bound, a permanently missing/bad input device retried forever — the voice task
     never exited, so its failure could never surface via ``_on_voice_task_done``/
@@ -296,6 +306,8 @@ def _run_recoverable(
                 listen(stream)
             return
         except error_types as exc:
+            if stop is not None and stop.is_set():
+                return  # cooperative shutdown wins — never count/rethrow this as a failure
             if open_time is not None and (now() - open_time) >= healthy_seconds:
                 consecutive_failures = 0  # stayed operational long enough — fresh streak
             open_time = None

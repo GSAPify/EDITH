@@ -11,6 +11,7 @@ one via :func:`select_adapter` or by constructing directly with injected deps.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -84,11 +85,23 @@ def _open_output_stream(sd_module: Any, *, samplerate: int, device: int | str | 
 
     A thin seam around the constructor + ``start()`` so the device override is
     unit-testable with a fake module — no hardware.
+
+    If ``start()`` raises or is cancelled, the stream has already been
+    constructed but no :class:`_RawOutputSink` is ever returned to reach any of
+    the later teardown paths — closing it here, before re-raising, is the only
+    chance to avoid leaking it (round 4 review). A teardown failure from that
+    ``close()`` call is swallowed (logged, never raised) so it can never mask
+    the original ``start()`` error/cancellation.
     """
     stream = sd_module.RawOutputStream(
         samplerate=samplerate, channels=1, dtype="int16", device=device
     )
-    stream.start()
+    try:
+        stream.start()
+    except BaseException:
+        with contextlib.suppress(Exception):
+            stream.close()
+        raise
     return stream
 
 
@@ -109,7 +122,11 @@ class _RawOutputSink:
 
     Each ``speak()`` previously opened a new PortAudio output stream that was never
     closed — the adapters now call exactly one of these once per utterance on every
-    exit path (normal completion, error, or cancellation).
+    exit path (normal completion, error, or cancellation). ``stream.close()`` is
+    always attempted even if ``stream.stop()``/``stream.abort()`` itself raises
+    (round 4 review) — otherwise a device error from the drain/discard call left the
+    stream itself never released. The ``_closed`` guard is set BEFORE either call, so
+    a raising first attempt still counts as "closed" and a retry stays a no-op.
     """
 
     def __init__(self, stream: Any) -> None:
@@ -123,15 +140,19 @@ class _RawOutputSink:
         if self._closed:
             return
         self._closed = True
-        self._stream.stop()
-        self._stream.close()
+        try:
+            self._stream.stop()
+        finally:
+            self._stream.close()
 
     def abort(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self._stream.abort()
-        self._stream.close()
+        try:
+            self._stream.abort()
+        finally:
+            self._stream.close()
 
 
 def _close_sink(sink: AudioSink) -> None:
@@ -367,9 +388,17 @@ class PiperAdapter(TTSAdapter):
         return "piper"
 
     async def speak(self, text: str) -> TTSHandle:
-        """Spawn the Piper subprocess in a background task; return a cancellable handle."""
+        """Spawn the Piper subprocess in a background task; return a cancellable handle.
+
+        The output sink is opened only AFTER ``runner(args)`` succeeds (round 4
+        review): opening it first meant a runner failure or cancellation left a
+        stream open with no ``_drain`` task ever created to close it in its
+        ``finally``. If sink/task setup fails once the process HAS started, the
+        process is terminated and the already-open sink torn down — via
+        ``_teardown_sink``, so a teardown failure there can never mask the
+        original setup failure.
+        """
         runner: PiperRunner = self._runner if self._runner is not None else _default_piper_runner
-        sink = self._sink if self._sink is not None else self._default_sink()
 
         args = ["piper", "--output-raw"]
         if self._model_path:
@@ -377,9 +406,17 @@ class PiperAdapter(TTSAdapter):
         args.extend(["--text", text])
 
         proc = await runner(args)
-        loop = asyncio.get_running_loop()
-        task: asyncio.Task[None] = asyncio.create_task(self._drain(proc, sink))
-        return _PiperHandle(proc, task, loop)
+        sink: AudioSink | None = None
+        try:
+            sink = self._sink if self._sink is not None else self._default_sink()
+            loop = asyncio.get_running_loop()
+            task: asyncio.Task[None] = asyncio.create_task(self._drain(proc, sink))
+            return _PiperHandle(proc, task, loop)
+        except BaseException:
+            proc.terminate()
+            if sink is not None:
+                _teardown_sink(sink, aborting=True)
+            raise
 
     def _default_sink(self) -> AudioSink:
         """Build an audio sink that imports ``sounddevice`` lazily.

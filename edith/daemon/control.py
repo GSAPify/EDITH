@@ -3,9 +3,14 @@
 The menu-bar app (and tests) send one JSON object per line — ``{"cmd": "..."}`` —
 and read one JSON object back: ``{"ok": true, ...}`` on success or
 ``{"ok": false, "error": "..."}`` on failure. The four locked commands are
-``pause`` / ``resume`` / ``kill`` / ``status``; ``status`` returns the LOCKED
-shape ``{state, active_skill, budget_used, last_event}`` plus the additive
-``voice_health`` (round 2 review — sticky voice-loop health).
+``pause`` / ``resume`` / ``kill`` / ``status``; ``status`` returns EXACTLY the
+LOCKED shape ``{state, active_skill, budget_used, last_event}`` documented in
+``docs/specs/00-north-star.md:152`` and ``docs/specs/01-memory-brain.md:788`` — no
+more, no less. Sticky voice-loop health (round 2 review) is surfaced through a
+separate, opt-in/versioned command, ``status_v2``, which returns those same four
+keys plus ``voice_health`` (round 4 review — the original additive-key design
+broke the documented exact shape for any client that validates it strictly; the
+menu bar continues polling the legacy ``status``, unaffected by this move).
 
 This is socket-only by construction — ``asyncio.start_unix_server`` binds a
 filesystem path, never a TCP port (north-star §4.2: "socket only, NEVER a public
@@ -113,6 +118,8 @@ class ControlServer:
         cmd = request.get("cmd")
         if cmd == "status":
             return {"ok": True, "status": self._status()}
+        if cmd == "status_v2":
+            return {"ok": True, "status": self._status_v2()}
         if cmd == "pause":
             result = self._transition(self._state.pause)
             if result.get("ok"):
@@ -139,13 +146,20 @@ class ControlServer:
         return {"ok": True}
 
     def _status(self) -> dict[str, object]:
-        # LOCKED shape (north-star §4.2): the original four keys, plus the additive
-        # ``voice_health`` (round 2 review) — existing clients read specific keys via
-        # ``.get()`` and tolerate the extra one; see edith/menubar/controller.py.
+        # LOCKED shape (north-star §4.2, spec 01 §788): EXACTLY these four keys —
+        # nothing more, nothing less. See _status_v2 for the additive, opt-in
+        # surface that carries voice_health (round 4 review).
         return {
             "state": self._state.state.value,
             "active_skill": self._state.active_skill,
             "budget_used": self._budget.budget_used(),
             "last_event": self._state.last_event,
-            "voice_health": self._state.voice_health.value,
         }
+
+    def _status_v2(self) -> dict[str, object]:
+        # Opt-in/versioned command (round 4 review): the same four locked keys as
+        # ``status``, plus the sticky ``voice_health`` (round 2 review) — kept off
+        # the locked ``status`` command so that wire contract stays exact for any
+        # client validating it strictly. RuntimeState's own sticky-health semantics
+        # are unchanged; this only changes which command surfaces the field.
+        return {**self._status(), "voice_health": self._state.voice_health.value}

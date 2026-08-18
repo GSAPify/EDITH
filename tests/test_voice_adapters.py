@@ -12,6 +12,7 @@ import sys
 import threading
 import types
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import pytest
 
@@ -19,6 +20,7 @@ from edith.voice.adapters import (
     ElevenLabsAdapter,
     PiperAdapter,
     _ElevenLabsHandle,
+    _open_output_stream,
     _PiperHandle,
     _RawOutputSink,
     resolve_device_override,
@@ -76,11 +78,23 @@ class FakeClosableSink:
 
 
 class FakeRawOutputStream:
-    """Fake ``sounddevice.RawOutputStream`` — records ctor kwargs, no hardware."""
+    """Fake ``sounddevice.RawOutputStream`` — records ctor kwargs, no hardware.
+
+    ``raise_on_start``/``raise_on_stop``/``raise_on_abort`` let a test inject a
+    failure from the real ``RawOutputStream`` call it stands in for, while still
+    recording that ``close()`` was (or was not) attempted around it.
+    """
 
     instances: list[FakeRawOutputStream] = []
 
-    def __init__(self, **kwargs: object) -> None:
+    def __init__(
+        self,
+        *,
+        raise_on_start: BaseException | None = None,
+        raise_on_stop: BaseException | None = None,
+        raise_on_abort: BaseException | None = None,
+        **kwargs: object,
+    ) -> None:
         self.kwargs = kwargs
         self.started = False
         self.stopped = False
@@ -89,10 +103,15 @@ class FakeRawOutputStream:
         self.stop_calls = 0
         self.abort_calls = 0
         self.close_calls = 0
+        self._raise_on_start = raise_on_start
+        self._raise_on_stop = raise_on_stop
+        self._raise_on_abort = raise_on_abort
         FakeRawOutputStream.instances.append(self)
 
     def start(self) -> None:
         self.started = True
+        if self._raise_on_start is not None:
+            raise self._raise_on_start
 
     def write(self, chunk: bytes) -> None:
         pass
@@ -100,10 +119,14 @@ class FakeRawOutputStream:
     def stop(self) -> None:
         self.stopped = True
         self.stop_calls += 1
+        if self._raise_on_stop is not None:
+            raise self._raise_on_stop
 
     def abort(self) -> None:
         self.aborted = True
         self.abort_calls += 1
+        if self._raise_on_abort is not None:
+            raise self._raise_on_abort
 
     def close(self) -> None:
         self.closed = True
@@ -138,6 +161,50 @@ class FakePiperProcess:
 
     def terminate(self) -> None:
         self.terminated = True
+
+
+# ---------------------------------------------------------------------------
+# _open_output_stream — partial-stream cleanup when start() raises/cancels
+# (round 4 review: a stream that fails to start was never closed, since no
+# _RawOutputSink was ever returned to reach any of the later teardown paths).
+# ---------------------------------------------------------------------------
+
+
+def test_open_output_stream_closes_the_stream_when_start_raises() -> None:
+    FakeRawOutputStream.instances = []
+
+    def _factory(**kwargs: Any) -> FakeRawOutputStream:
+        return FakeRawOutputStream(raise_on_start=RuntimeError("start boom"), **kwargs)
+
+    fake_module = types.SimpleNamespace(RawOutputStream=_factory)
+
+    with pytest.raises(RuntimeError, match="start boom"):
+        _open_output_stream(fake_module, samplerate=22050, device=None)
+
+    stream = FakeRawOutputStream.instances[-1]
+    assert stream.close_calls == 1  # partially-opened stream is torn down, not leaked
+
+
+def test_open_output_stream_start_failure_survives_a_close_that_also_raises() -> None:
+    """A teardown failure in close() must never mask the original start() error."""
+
+    class _AlsoRaisingOnCloseStream(FakeRawOutputStream):
+        def close(self) -> None:
+            super().close()
+            raise OSError("close boom")
+
+    FakeRawOutputStream.instances = []
+
+    def _factory(**kwargs: Any) -> _AlsoRaisingOnCloseStream:
+        return _AlsoRaisingOnCloseStream(raise_on_start=RuntimeError("start boom"), **kwargs)
+
+    fake_module = types.SimpleNamespace(RawOutputStream=_factory)
+
+    with pytest.raises(RuntimeError, match="start boom"):
+        _open_output_stream(fake_module, samplerate=22050, device=None)
+
+    stream = FakeRawOutputStream.instances[-1]
+    assert stream.close_calls == 1  # close() was still attempted despite raising
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +248,42 @@ def test_raw_output_sink_abort_then_close_is_idempotent() -> None:
     sink.close()
     assert stream.abort_calls == 1
     assert stream.stop_calls == 0
+    assert stream.close_calls == 1
+
+
+def test_raw_output_sink_close_still_closes_the_stream_when_stop_raises() -> None:
+    """stream.close() must still be attempted even though stream.stop() raised."""
+    stream = FakeRawOutputStream(raise_on_stop=RuntimeError("stop boom"))
+    sink = _RawOutputSink(stream)
+
+    with pytest.raises(RuntimeError, match="stop boom"):
+        sink.close()
+
+    assert stream.close_calls == 1
+
+
+def test_raw_output_sink_abort_still_closes_the_stream_when_abort_raises() -> None:
+    """stream.close() must still be attempted even though stream.abort() raised."""
+    stream = FakeRawOutputStream(raise_on_abort=RuntimeError("abort boom"))
+    sink = _RawOutputSink(stream)
+
+    with pytest.raises(RuntimeError, match="abort boom"):
+        sink.abort()
+
+    assert stream.close_calls == 1
+
+
+def test_raw_output_sink_close_stays_idempotent_after_a_raising_close() -> None:
+    """A close() call that raised must still count as "closed" — a retry must not
+    run the stream teardown a second time."""
+    stream = FakeRawOutputStream(raise_on_stop=RuntimeError("stop boom"))
+    sink = _RawOutputSink(stream)
+
+    with pytest.raises(RuntimeError, match="stop boom"):
+        sink.close()
+    sink.close()  # no-op — must not call stream.stop()/close() again
+
+    assert stream.stop_calls == 1
     assert stream.close_calls == 1
 
 
@@ -618,6 +721,65 @@ async def test_piper_model_path_included_when_set() -> None:
     args = received[0]
     assert "--model" in args
     assert "/models/en.onnx" in args
+
+
+# ---------------------------------------------------------------------------
+# Piper pre-task sink leak (round 4 review): the output sink must not be opened
+# until after `runner(args)` succeeds — a failed/cancelled runner must own no
+# stream at all, and a failure setting up the sink/task AFTER a successful
+# runner must terminate the process and tear down whatever sink WAS opened.
+# ---------------------------------------------------------------------------
+
+
+async def test_piper_runner_exception_opens_no_output_sink(
+    fake_sounddevice: type[FakeRawOutputStream],
+) -> None:
+    async def _raising_runner(args: list[str]) -> FakePiperProcess:
+        raise RuntimeError("piper binary missing")
+
+    adapter = PiperAdapter(runner=_raising_runner)
+    with pytest.raises(RuntimeError, match="piper binary missing"):
+        await adapter.speak("hello")
+
+    assert fake_sounddevice.instances == []  # no stream ever opened/owned
+
+
+async def test_piper_runner_cancellation_opens_no_output_sink(
+    fake_sounddevice: type[FakeRawOutputStream],
+) -> None:
+    async def _cancelling_runner(args: list[str]) -> FakePiperProcess:
+        raise asyncio.CancelledError()
+
+    adapter = PiperAdapter(runner=_cancelling_runner)
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.speak("hello")
+
+    assert fake_sounddevice.instances == []  # no stream ever opened/owned
+
+
+async def test_piper_post_runner_task_setup_failure_terminates_process_and_tears_down_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """runner() succeeds, but wiring the drain task afterwards fails — the process must
+    be terminated and the already-open sink torn down, without masking that failure."""
+    fake_proc = FakePiperProcess()
+    sink = FakeClosableSink()  # no abort() -> _abort_sink falls back to close()
+
+    async def _runner(args: list[str]) -> FakePiperProcess:
+        return fake_proc
+
+    def _raising_create_task(coro: object, *args: object, **kwargs: object) -> None:
+        coro.close()  # type: ignore[attr-defined] # avoid a "coroutine was never awaited" warning
+        raise RuntimeError("create_task boom")
+
+    monkeypatch.setattr(asyncio, "create_task", _raising_create_task)
+
+    adapter = PiperAdapter(runner=_runner, sink=sink)
+    with pytest.raises(RuntimeError, match="create_task boom"):
+        await adapter.speak("hello")
+
+    assert fake_proc.terminated  # the already-started process must not be leaked
+    assert sink.close_calls == 1  # the already-open sink must still be torn down
 
 
 # ---------------------------------------------------------------------------

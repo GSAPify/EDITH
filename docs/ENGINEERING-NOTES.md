@@ -267,10 +267,10 @@ failure. `RuntimeState.voice_health` (`edith.daemon.state.VoiceHealth`, `HEALTHY
 dedicated, sticky field instead: `_on_voice_task_done` calls `mark_voice_failed()` alongside its
 existing `last_event = "voice.failed"` write, `_start_voice_loop` calls `mark_voice_healthy()` on
 every fresh start (so a stale failure from a prior run can't linger), and nothing else in
-`RuntimeState` touches it. Control API `status` now returns five keys —
-`{state, active_skill, budget_used, last_event, voice_health}` — the addition is deliberately
-additive; `edith.menubar.controller.format_label` only reads two of the original four keys via
-`.get()`, so existing clients are unaffected.
+`RuntimeState` touches it. Control API `status` originally grew a fifth key —
+`{state, active_skill, budget_used, last_event, voice_health}` — as a deliberately additive
+change; round 4 review moved `voice_health` to a separate `status_v2` command instead (see
+below), since the addition broke the exact four-key shape the canonical specs document.
 
 **3. Cancellation drained instead of cutting off.** `_RawOutputSink.close()` (`stream.stop()`
 then `stream.close()`) waits for queued audio to finish playing before releasing the stream —
@@ -326,6 +326,56 @@ through a shared `_schedule_threadsafe` helper: it no-ops if `loop.is_closed()` 
 true, and otherwise suppresses a `RuntimeError` raised by `call_soon_threadsafe` itself (the
 loop closing in the race window between the check and the call) — there is nothing left to
 cancel once the loop is gone, so this becomes a no-op rather than crashing the mic thread.
+
+### Round 4 review: partial-open leaks, a pre-task sink leak, a locked-contract break, a shutdown race, and an id in a debug log
+
+Five independent gaps, closed together:
+
+**1. `_open_output_stream` leaked a partially-opened stream.** If `RawOutputStream.start()`
+raised (the exact failure this whole fix hardens against), the stream had already been
+constructed but no `_RawOutputSink` was ever returned — none of the adapters' later teardown
+paths (`_teardown_sink` in a `finally`) could ever reach it, so it leaked. `_open_output_stream`
+now wraps `start()` in a `try`/`except BaseException` that closes the partially-opened stream
+before re-raising the original error; the `close()` call itself is wrapped in
+`contextlib.suppress(Exception)` so a teardown failure there can never mask the original
+`start()` error. `_RawOutputSink.close()`/`.abort()` similarly now wrap `stream.stop()`/
+`stream.abort()` in a `try`/`finally` so `stream.close()` is always attempted even if the
+drain/discard call itself raises — the `_closed` guard is still set before either call, so a
+raising first attempt still counts as "closed" for idempotency.
+
+**2. `PiperAdapter.speak()` opened its output sink before `runner(args)` had even been awaited.**
+If the `piper` binary was missing, startup failed, or the await was cancelled, `_drain` (and its
+`finally`) was never created, so the already-open sink was never closed. `speak()` now builds the
+sink only AFTER `runner(args)` returns successfully; if sink/task setup fails once the process
+HAS started, the process is terminated and the already-open sink torn down via `_teardown_sink`
+(so a teardown failure there can't mask the original setup failure either) before the error
+re-raises unchanged.
+
+**3. The additive `voice_health` key on `status` broke the locked wire contract.** Round 2's
+fifth key was tolerated by the in-repo menu client, but `docs/specs/00-north-star.md:152` and
+`docs/specs/01-memory-brain.md:788` both document `status` as returning EXACTLY four keys — a
+client validating that shape strictly would break. `status` now returns exactly the original
+four keys again; a new opt-in/versioned command, `status_v2`, returns those four plus
+`voice_health`. `RuntimeState`'s sticky voice-health semantics (`mark_voice_healthy`/
+`mark_voice_failed`) are unchanged — only which command surfaces the field moved. The menu bar
+continues polling the legacy `status`, which does not need `voice_health` today.
+
+**4. A cooperative shutdown could still be misreported as a voice failure.** `stop.wait()`
+returning `False` (not interrupted) only re-enters the loop between attempts — but if `stop` is
+set WHILE an open/read is failing (rather than during the bounded wait), the ceiling-escalation
+branch ran before anything had a chance to observe the newly-set event, so a shutdown landing on
+the terminal attempt could still trip `consecutive_failures >= max_retries` and re-raise the
+final PortAudio error as a genuine voice failure. `_run_recoverable`'s `except` clause now checks
+`stop.is_set()` FIRST — before the healthy-reset check, before incrementing
+`consecutive_failures`, before the ceiling comparison, before any logging — and returns cleanly
+with no raise if shutdown was requested, exactly like the existing `wait()`-returns-`True` path.
+
+**5. The hybrid-recall debug log printed graph/semantic Fact ids.** `sanitize_node` sanitizes only
+node *properties* — ingestion derives some ids directly from person/project names
+(`edith/ingest/graph_map.py:41-48`), so an id is not guaranteed secret- or PII-free, despite
+`_log_recall_hybrid_debug`'s stated safe-diagnostics contract. The debug line (still gated on
+`EDITH_MEMORY_DEBUG=1`, default off) now logs only `total`/`graph`/`semantic` counts and the
+numeric semantic distances — no ids, text, names, paths, remotes, or any other hit property.
 
 ## Baseline quirks on a clean checkout
 

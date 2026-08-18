@@ -94,25 +94,25 @@ def _log_recall_hybrid_debug(
     semantic_hits: list[dict[str, object]],
     total: int,
 ) -> None:
-    """Debug-only (``EDITH_MEMORY_DEBUG=1``, default off): counts + ids + distances ONLY.
+    """Debug-only (``EDITH_MEMORY_DEBUG=1``, default off): counts + numeric distances ONLY.
 
-    Never touches hit text/name/path/remote/summary — those are the owner's own data
-    (or, pre-sanitize, a planted secret) and have no business in a debug log.
+    Never logs an id, text, name, path, remote, or any other hit property (round 4
+    review). ``sanitize_node`` sanitizes only node *properties* — ingestion derives
+    some ids directly from person/project names (``edith/ingest/graph_map.py:41-48``)
+    — so an id is not guaranteed to be secret- or PII-free either, despite this
+    helper's stated safe-diagnostics contract. Counts and numeric distances carry no
+    such risk.
     """
     if os.environ.get("EDITH_MEMORY_DEBUG") != "1":
         return
-    graph_ids = [str(h.get("id", "")) for h in graph_hits]
-    semantic_ids = [str(h.get("id", "")) for h in semantic_hits]
     distances = [
         h["distance"] for h in semantic_hits if isinstance(h.get("distance"), (int, float))
     ]
     _log.debug(
-        "recall_hybrid: total=%d graph=%d semantic=%d graph_ids=%s semantic_ids=%s distances=%s",
+        "recall_hybrid: total=%d graph=%d semantic=%d distances=%s",
         total,
         len(graph_hits),
         len(semantic_hits),
-        graph_ids,
-        semantic_ids,
         distances,
     )
 

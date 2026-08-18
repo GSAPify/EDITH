@@ -16,11 +16,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-# LOCKED status shape (north-star §4.2, edith/daemon/control.py:_status): the four
-# original keys, plus the additive `voice_health` (round 2 review). Only state +
+# LOCKED status shape (north-star §4.2, edith/daemon/control.py:_status): EXACTLY
+# the four documented keys. The menu bar continues polling this legacy `status`
+# command rather than the opt-in `status_v2` (round 4 review), which additionally
+# carries the sticky `voice_health` field — not needed here yet. Only state +
 # active_skill feed the title; the rest are available on `last_status` for a
-# future menu body / tooltip. Read via `.get()` below so an additive key is
-# tolerated without a client-side change.
+# future menu body / tooltip. Read via `.get()` below so an unrecognized/missing
+# key is tolerated without a client-side change.
 _STATE_LABELS = {
     "running": "running",
     "paused": "paused",

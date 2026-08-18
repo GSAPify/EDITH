@@ -266,6 +266,49 @@ def test_recovery_reraises_after_max_retries_reached() -> None:
     ]
 
 
+def test_recovery_stop_set_during_terminal_attempt_returns_cleanly_no_raise() -> None:
+    """Round 4 review: a shutdown landing exactly as the terminal (would-be-ceiling)
+    attempt's read fails must win the race — stop.is_set() is checked BEFORE the
+    healthy-reset/ceiling-escalation/logging path, so the final PortAudio error is
+    never counted or re-raised as a voice failure, and no retry/reset/wait/open
+    happens beyond that attempt."""
+    stop = threading.Event()
+    calls: list[str] = []
+    attempts = {"n": 0}
+
+    def open_stream():
+        calls.append("open")
+        return _ok_stream()
+
+    def listen(stream: object) -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 2:
+            # Shutdown lands while the terminal attempt's read is failing — before
+            # _run_recoverable's except block has observed it.
+            stop.set()
+        raise _FakePortAudioError("PaMacCore (AUHAL) err=-50")
+
+    def wait(seconds: float) -> bool:
+        calls.append(f"wait:{seconds}")
+        return False
+
+    _run_recoverable(
+        open_stream,
+        listen,
+        reset=lambda: calls.append("reset"),
+        error_types=(_FakePortAudioError,),
+        wait=wait,
+        retry_seconds=0.1,
+        stop=stop,
+        max_retries=2,  # attempt 2 would otherwise hit the ceiling and re-raise
+    )
+
+    # No raise (a bare call above already proves that). Exactly one open/reset/wait
+    # for attempt 1, then attempt 2's open — and NOTHING beyond it: no second
+    # reset/wait/reopen, and no re-raise of the terminal PortAudio error.
+    assert calls == ["open", "reset", "wait:0.1", "open"]
+
+
 def test_recovery_stop_event_exits_before_ceiling_reached_no_raise() -> None:
     """A stop request during the retry wait must still exit cleanly (no raise) even
     though the consecutive-failure ceiling was never reached."""

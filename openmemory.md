@@ -52,7 +52,9 @@
   `speak_response()` marks owner-facing replies so their completed playback opens the follow-up
   window; ordinary `speak()` is reserved for startup and narration that must not open the mic.
 - **Control API** (`edith/daemon/control.py`, `client.py`): JSON-lines commands over a local unix
-  socket for status, pause, resume, and kill.
+  socket for status, pause, resume, and kill. `status` returns exactly the four locked keys the
+  specs document; `status_v2` is an opt-in, additive command that returns those four plus the
+  sticky `voice_health`.
 - **LaunchAgent** (`deploy/`): sources the secured `.env`, starts the venv daemon, and keeps it
   alive across crashes and login sessions.
 
