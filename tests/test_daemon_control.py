@@ -7,7 +7,7 @@ Asserted behaviors (task TDD list):
   - pause -> status shows "paused"; resume -> "running",
   - unknown cmd -> structured error {"ok": false, ...},
   - status returns the LOCKED shape exactly: {state, active_skill, budget_used,
-    last_event} — exact key set, not just presence,
+    last_event, voice_health} — exact key set, not just presence,
   - the socket file perms are 0600,
   - kill flips state to "stopping",
   - budget_used comes from the injected BudgetView (0 until Guard lands).
@@ -71,12 +71,40 @@ async def test_status_returns_locked_shape(sock_path):
 
     assert resp["ok"] is True
     status = cast(dict[str, object], resp["status"])
-    # LOCKED shape — exact key set, nothing more, nothing less.
+    # LOCKED shape (north-star §4.2, spec 01 §788) — EXACTLY the original four keys,
+    # nothing more, nothing less. voice_health moved to the opt-in `status_v2`
+    # command (round 4 review) — this wire contract stays exactly as documented.
     assert set(status) == {"state", "active_skill", "budget_used", "last_event"}
     assert status["state"] == "running"
     assert status["active_skill"] == "pr-review"
     assert status["last_event"] == "brain.decision"
     assert status["budget_used"] == 0
+
+
+async def test_status_v2_returns_locked_shape_plus_voice_health(sock_path):
+    state = RuntimeState()
+    state.active_skill = "pr-review"
+    state.last_event = "brain.decision"
+    server, sock = await _server_on(sock_path, state)
+    try:
+        resp = await ControlClient(sock).send({"cmd": "status_v2"})
+    finally:
+        await server.stop()
+
+    assert resp["ok"] is True
+    status = cast(dict[str, object], resp["status"])
+    # status_v2 is additive: the four locked keys, plus the sticky voice_health
+    # (round 2 review) — moved here from `status` so the locked wire contract
+    # documented in docs/specs/00-north-star.md:152 / 01-memory-brain.md:788 stays
+    # exact (round 4 review).
+    assert set(status) == {
+        "state", "active_skill", "budget_used", "last_event", "voice_health",
+    }
+    assert status["state"] == "running"
+    assert status["active_skill"] == "pr-review"
+    assert status["last_event"] == "brain.decision"
+    assert status["budget_used"] == 0
+    assert status["voice_health"] == "healthy"
 
 
 async def test_pause_then_status_shows_paused(sock_path):

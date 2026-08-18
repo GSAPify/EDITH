@@ -14,6 +14,7 @@ Nothing in here is aspirational. If a claim could not be verified without hardwa
 - [The Kuzu lock](#the-kuzu-lock)
 - [Graph refresh semantics](#graph-refresh-semantics)
 - [The half-duplex mic gate, and the duplex spike](#the-half-duplex-mic-gate-and-the-duplex-spike)
+- [CoreAudio/PortAudio resilience: bounded reopen, not silence](#coreaudioportaudio-resilience-bounded-reopen-not-silence)
 - [Baseline quirks on a clean checkout](#baseline-quirks-on-a-clean-checkout)
 - [Owner live-smoke ledger](#owner-live-smoke-ledger)
 - [Verification convention](#verification-convention)
@@ -175,6 +176,206 @@ Three measurement traps the bench encodes, each of which produced a wrong number
    fixed position. Omitted, double-talk is reported as null rather than fabricated.
 
 Nothing in the voice path consumes any of this yet.
+
+## CoreAudio/PortAudio resilience: bounded reopen, not silence
+
+Before this fix, a `PaMacCore (AUHAL) err=-50` (or any other `sounddevice.PortAudioError`
+while opening or reading the input stream) killed the mic thread permanently: the daemon and
+Control API kept reporting RUNNING, but the voice loop was gone, silently. A shared
+Bluetooth headset used for both input and output (`ULT WEAR`, common on this box) is a
+plausible trigger — a CoreAudio profile renegotiation on that one device can knock out the
+open stream.
+
+The fix is a bounded, generic retry seam, `edith.voice.live._run_recoverable`: opening or
+reading raises `sd.PortAudioError` → the failed stream context is closed, wake/conversation/
+preroll state is reset fail-closed, then a bounded wait (default **1.0 s**,
+`EDITH_AUDIO_RETRY_SECONDS` overrides it) — interruptible via `threading.Event.wait`, so a
+cooperative `stop()` during shutdown does not have to wait out the delay — and the stream is
+genuinely reopened. It never converts a dead stream into endless zero-frames; it either reads
+real audio or keeps retrying, and every retry logs a warning with the exception type/message
+only (never audio or transcript content).
+
+`resolve_audio_retry_seconds()` parses `EDITH_AUDIO_RETRY_SECONDS` with `float()`, which
+accepts `"nan"`/`"inf"`/`"-inf"` without raising — those, plus any negative value (which would
+make the wait meaningless or invert it) or a malformed string, all fall back to the 1.0 s
+default via an explicit `math.isfinite()` + non-negative check. `0` is accepted (an immediate,
+uninterrupted-retry loop), as is any other finite non-negative value.
+
+Two related gaps closed alongside it:
+
+- **The voice-loop task had no done callback.** `EdithDaemon._start_voice_loop` now attaches
+  `_on_voice_task_done`: a cancelled or normally-completed task stays silent, but an
+  unexpected exception is logged once and sets `RuntimeState.last_event = "voice.failed"`, so
+  Control API `status` can reveal a degraded voice path while the daemon stays up. It does
+  **not** respawn the loop — an arbitrary programming exception is a different failure class
+  than the bounded PortAudio retry above, which already lives inside the audio loop itself.
+- **`stop()` used to abort shutdown on an already-failed voice task.** Awaiting a done task
+  re-raises its exception on every await, not just the first — so once `_on_voice_task_done`
+  had already reported a failure, `EdithDaemon.stop()`'s own `asyncio.wait_for(voice_task, …)`
+  join would re-raise that same exception and abort everything after it in `stop()`: Memory/
+  Kuzu close, the reasoner, SecureStore, Control API teardown, and `_stopped.set()`. `stop()`
+  now catches the declared `Exception` case (never `BaseException`, so a `CancelledError` — the
+  voice task's own, or `stop()`'s own coroutine being cancelled — still propagates via the
+  existing `TimeoutError`/`CancelledError` clause) and logs it at debug level without
+  re-reporting, since the done callback already did that once.
+- **TTS output streams leaked.** Both `ElevenLabsAdapter` and `PiperAdapter` opened a fresh
+  `sd.RawOutputStream` per utterance and never closed it. `_RawOutputSink` wraps the stream in
+  a closable callable; the adapters close it exactly once per utterance on every exit path
+  (normal completion, a stream/adapter error, or `handle.stop()`/cancellation) via a plain
+  `getattr(sink, "close", None)` check, so an injected plain-function sink (as most tests use)
+  is untouched.
+
+Device overrides: `EDITH_INPUT_DEVICE` (input) and `EDITH_OUTPUT_DEVICE` (output, both TTS
+adapters) accept the same shape sounddevice does — unset/blank keeps the sounddevice default,
+an ordinary signed integer string is a device index, anything else is a name/query string
+(`edith.voice.adapters.resolve_device_override`). Selected device identifiers are logged only
+when `EDITH_VOICE_DEBUG=1`, and neither default exposes a private device name. The parser calls
+`int()` directly inside a `try`/`except ValueError`, rather than `str.isdigit()` guarding an
+`int()` call: `isdigit()` is `True` for some Unicode numerics (e.g. a superscript digit) that
+`int()` itself cannot parse, which used to raise instead of falling through to the query-string
+branch like every other non-integer input (round 2 review).
+
+This is a half-duplex-only fix. VPIO/Speex duplex wiring (see the section above) is explicitly
+out of scope here — the retry seam only concerns keeping the existing half-duplex mic stream
+alive across a transient CoreAudio failure.
+
+### Round 2 review: a bounded ceiling, sticky health, and real barge-in cutoff
+
+Four gaps in the fix above, closed together:
+
+**1. The retry loop had no ceiling.** A permanently missing/bad input device retried
+`_run_recoverable` forever: the voice task never exited, so its failure could never reach
+`_on_voice_task_done`, and the daemon reported RUNNING indefinitely with a dead mic.
+`EDITH_AUDIO_MAX_RETRIES` (default **5**, via `resolve_audio_max_retries()`) now bounds
+consecutive failures; the ceiling failure is **re-raised**, not swallowed, so it propagates
+through `_blocking_listen` to the voice task and `_on_voice_task_done` observes it normally.
+The parser accepts only a finite integer `>= 1` — `int()` already rejects `"nan"`/`"inf"`/
+non-integer strings by raising, so the only extra check needed is `value < 1` (malformed,
+zero, or negative all fall back to the default rather than disabling the ceiling). Staying
+operational for at least `_AUDIO_HEALTHY_SECONDS` resets the consecutive-failure counter (see
+"Round 3 review" below for why a bare successful open is not enough on its own); an
+intermittently-flaky stream that keeps running fine between glitches never hits the ceiling,
+while a device that never opens — or opens but can never actually be read — escalates
+deterministically within exactly `max_retries` attempts. `stop()` being set during the retry
+wait still exits immediately with no raise, exactly as before the ceiling existed — the
+ceiling only changes what happens when retries, not a cooperative stop, exhaust the budget.
+
+**2. There was nowhere durable to see the failure.** `last_event` is a busy, general-purpose
+label — session narration and the weekly graph refresh both overwrite it constantly — so using
+it to mean "voice is down" meant the very next unrelated event would silently un-flag a real
+failure. `RuntimeState.voice_health` (`edith.daemon.state.VoiceHealth`, `HEALTHY`/`FAILED`) is a
+dedicated, sticky field instead: `_on_voice_task_done` calls `mark_voice_failed()` alongside its
+existing `last_event = "voice.failed"` write, `_start_voice_loop` calls `mark_voice_healthy()` on
+every fresh start (so a stale failure from a prior run can't linger), and nothing else in
+`RuntimeState` touches it. Control API `status` originally grew a fifth key —
+`{state, active_skill, budget_used, last_event, voice_health}` — as a deliberately additive
+change; round 4 review moved `voice_health` to a separate `status_v2` command instead (see
+below), since the addition broke the exact four-key shape the canonical specs document.
+
+**3. Cancellation drained instead of cutting off.** `_RawOutputSink.close()` (`stream.stop()`
+then `stream.close()`) waits for queued audio to finish playing before releasing the stream —
+correct for normal completion, wrong for a barge-in: the owner interrupting EDITH mid-sentence
+would still hear the buffered tail play out. `_RawOutputSink` now also has `abort()`
+(`stream.abort()` then `stream.close()`, PortAudio's "discard immediately" call), sharing the
+same `_closed` guard so at most one of the two ever runs the real teardown. Both adapters'
+background tasks (`ElevenLabsAdapter._run_stream`, `PiperAdapter._drain`) track a local
+`aborting` flag, set only in a `except BaseException: aborting = True; raise` clause, and choose
+`_teardown_sink(sink, aborting=...)` in a `finally` — cancellation and genuine stream/read errors
+call `abort()`, normal completion calls `close()`. `_teardown_sink` swallows (logs at debug)
+anything the teardown call itself raises, so a broken sink's `abort()`/`close()` can never
+replace the original `CancelledError` or stream exception being propagated. `_abort_sink` falls
+back to `close()` for an injected sink exposing only `close()` (or is a no-op for a plain
+callable sink with neither) — no existing test double needs to change.
+
+**4. `handle.stop()` was called from the wrong thread.** Barge-in can land while the live mic
+loop's worker thread is between frames, and `VoiceIO._on_wake`/`is_speaking` call `handle.stop()`
+synchronously from wherever they run — which, transitively, is the mic thread, not the event
+loop that owns the TTS task. `asyncio.Task.cancel()` is not documented thread-safe.
+`_ElevenLabsHandle`/`_PiperHandle` now capture the loop returned by `asyncio.get_running_loop()`
+inside `speak()` and `stop()` schedules the actual `task.cancel()` (and, for Piper,
+`proc.terminate()`) via `loop.call_soon_threadsafe(...)` instead of calling them directly. This
+adds one extra event-loop tick before cancellation actually lands compared to the old direct
+call — tests that assert post-`stop()` state now await the handle's task to completion (or an
+extra `asyncio.sleep(0)`) rather than assuming a single tick, and this has no operational effect
+since barge-in polling already happens once per ~80 ms mic frame.
+
+### Round 3 review: the ceiling was still evadable, and a closed-loop stop() could raise
+
+**1. A successful open is NOT healthy by itself.** Round 2's ceiling reset
+`consecutive_failures` to zero the instant `open_stream()` returned — before `listen()` had
+run at all. An open-succeeds/read-immediately-fails cycle therefore reset to zero on *every*
+attempt and could never accumulate past one, evading the ceiling entirely for exactly the
+device class the ceiling exists to catch: one that opens fine but can never actually be read.
+`_run_recoverable` now takes an injectable monotonic clock (`now`, defaults to
+`time.monotonic`) and a module-level `_AUDIO_HEALTHY_SECONDS = 1.0`. The open time is recorded
+only after context ENTRY (i.e. once `open_stream()` has genuinely succeeded and the `with`
+block's body is about to run), not merely after calling `open_stream()`. On the next failure —
+whether from that same stream failing again or from a subsequent `listen()` — the counter
+resets to a fresh streak (this failure becomes attempt 1) *only if* the stream stayed
+operational for at least `_AUDIO_HEALTHY_SECONDS` since that open; an immediate failure
+(elapsed `< _AUDIO_HEALTHY_SECONDS`) instead continues the existing streak, genuinely
+accumulating toward `max_retries` and re-raising at exactly the ceiling — no extra
+reset/wait/open beyond it, and `stop()` during the wait still wins with no raise.
+
+**2. `handle.stop()` could raise from the mic thread during degraded shutdown.** Round 2 moved
+`task.cancel()`/`proc.terminate()` onto the owning event loop via `loop.call_soon_threadsafe`
+so cancellation from the mic thread was thread-safe — but `call_soon_threadsafe` itself raises
+`RuntimeError` if the loop has already closed, which can happen if `stop()` lands late in a
+degraded/last-gasp shutdown. `_ElevenLabsHandle.stop()` and `_PiperHandle.stop()` now route
+through a shared `_schedule_threadsafe` helper: it no-ops if `loop.is_closed()` is already
+true, and otherwise suppresses a `RuntimeError` raised by `call_soon_threadsafe` itself (the
+loop closing in the race window between the check and the call) — there is nothing left to
+cancel once the loop is gone, so this becomes a no-op rather than crashing the mic thread.
+
+### Round 4 review: partial-open leaks, a pre-task sink leak, a locked-contract break, a shutdown race, and an id in a debug log
+
+Five independent gaps, closed together:
+
+**1. `_open_output_stream` leaked a partially-opened stream.** If `RawOutputStream.start()`
+raised (the exact failure this whole fix hardens against), the stream had already been
+constructed but no `_RawOutputSink` was ever returned — none of the adapters' later teardown
+paths (`_teardown_sink` in a `finally`) could ever reach it, so it leaked. `_open_output_stream`
+now wraps `start()` in a `try`/`except BaseException` that closes the partially-opened stream
+before re-raising the original error; the `close()` call itself is wrapped in
+`contextlib.suppress(Exception)` so a teardown failure there can never mask the original
+`start()` error. `_RawOutputSink.close()`/`.abort()` similarly now wrap `stream.stop()`/
+`stream.abort()` in a `try`/`finally` so `stream.close()` is always attempted even if the
+drain/discard call itself raises — the `_closed` guard is still set before either call, so a
+raising first attempt still counts as "closed" for idempotency.
+
+**2. `PiperAdapter.speak()` opened its output sink before `runner(args)` had even been awaited.**
+If the `piper` binary was missing, startup failed, or the await was cancelled, `_drain` (and its
+`finally`) was never created, so the already-open sink was never closed. `speak()` now builds the
+sink only AFTER `runner(args)` returns successfully; if sink/task setup fails once the process
+HAS started, the process is terminated and the already-open sink torn down via `_teardown_sink`
+(so a teardown failure there can't mask the original setup failure either) before the error
+re-raises unchanged.
+
+**3. The additive `voice_health` key on `status` broke the locked wire contract.** Round 2's
+fifth key was tolerated by the in-repo menu client, but `docs/specs/00-north-star.md:152` and
+`docs/specs/01-memory-brain.md:788` both document `status` as returning EXACTLY four keys — a
+client validating that shape strictly would break. `status` now returns exactly the original
+four keys again; a new opt-in/versioned command, `status_v2`, returns those four plus
+`voice_health`. `RuntimeState`'s sticky voice-health semantics (`mark_voice_healthy`/
+`mark_voice_failed`) are unchanged — only which command surfaces the field moved. The menu bar
+continues polling the legacy `status`, which does not need `voice_health` today.
+
+**4. A cooperative shutdown could still be misreported as a voice failure.** `stop.wait()`
+returning `False` (not interrupted) only re-enters the loop between attempts — but if `stop` is
+set WHILE an open/read is failing (rather than during the bounded wait), the ceiling-escalation
+branch ran before anything had a chance to observe the newly-set event, so a shutdown landing on
+the terminal attempt could still trip `consecutive_failures >= max_retries` and re-raise the
+final PortAudio error as a genuine voice failure. `_run_recoverable`'s `except` clause now checks
+`stop.is_set()` FIRST — before the healthy-reset check, before incrementing
+`consecutive_failures`, before the ceiling comparison, before any logging — and returns cleanly
+with no raise if shutdown was requested, exactly like the existing `wait()`-returns-`True` path.
+
+**5. The hybrid-recall debug log printed graph/semantic Fact ids.** `sanitize_node` sanitizes only
+node *properties* — ingestion derives some ids directly from person/project names
+(`edith/ingest/graph_map.py:41-48`), so an id is not guaranteed secret- or PII-free, despite
+`_log_recall_hybrid_debug`'s stated safe-diagnostics contract. The debug line (still gated on
+`EDITH_MEMORY_DEBUG=1`, default off) now logs only `total`/`graph`/`semantic` counts and the
+numeric semantic distances — no ids, text, names, paths, remotes, or any other hit property.
 
 ## Baseline quirks on a clean checkout
 

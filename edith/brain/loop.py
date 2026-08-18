@@ -30,7 +30,7 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Protocol
+from typing import Protocol, cast
 
 from edith.brain.history import TurnBuffer
 from edith.bus import Event, EventBus
@@ -90,6 +90,22 @@ class MemoryLike(Protocol):
     ) -> None: ...
 
 
+def _recall(memory: MemoryLike, query: str) -> list[dict[str, object]]:
+    """Recall via ``recall_hybrid`` when the store exposes it, else plain ``recall``.
+
+    Capability-detected via ``getattr`` rather than widening ``MemoryLike`` — the real
+    ``VectorMemoryStore`` gains graph+semantic fusion (conv/think Facts carry no graph
+    edges, the root cause this closes), while every existing fake/plain graph-only
+    store keeps calling ``recall`` exactly as before. Used on both the normal and the
+    explicit "think about" recall call sites, so both branches get the fix.
+    """
+    recall_hybrid = getattr(memory, "recall_hybrid", None)
+    if callable(recall_hybrid):
+        hybrid = cast("Callable[..., list[dict[str, object]]]", recall_hybrid)
+        return hybrid(query, k=_RECALL_K)
+    return memory.recall(query)
+
+
 class RouterLike(Protocol):
     """The slice of the Router contract Brain uses (spec 05 §4.3)."""
 
@@ -126,6 +142,11 @@ ResolveRepoLike = Callable[[str], Awaitable[ResolveResult]]
 # phrase. Deliberately a thin heuristic, NOT an NLP layer (spec 09 §Open questions):
 # it only fires the resolver, which itself no-ops cleanly on a not-found name.
 _REPO_PHRASE = re.compile(r"\b([A-Za-z0-9][\w-]{2,})\s+repo\b", re.IGNORECASE)
+
+# Fan-out for the hybrid-recall fix (conv/think Facts carry no graph edges, so the
+# graph-only recall() Brain used to call missed them — VectorMemoryStore.recall_hybrid
+# fuses graph + semantic). Matches VectorMemoryStore.recall_hybrid's own default.
+_RECALL_K = 5
 
 
 class Brain:
@@ -198,7 +219,7 @@ class Brain:
         # later via brain.background_done). Only when a reasoner is wired; otherwise the
         # phrase falls straight through to the ordinary recall→answer path below.
         if self._reasoner is not None and _THINK_PHRASE.search(utterance):
-            recalled = self._memory.recall(utterance)
+            recalled = _recall(self._memory, utterance)
             job = await self._start_background(
                 self._build_messages(utterance, recalled), utterance
             )
@@ -207,7 +228,7 @@ class Brain:
             return
 
         # 1. RECALL
-        recalled = self._memory.recall(utterance)
+        recalled = _recall(self._memory, utterance)
 
         # 1b. RESOLVE-ON-MISS (spec 09): recall came back empty AND the utterance
         # names a repo AND a resolver is wired -> fetch+redact+fast-answer the
@@ -411,6 +432,37 @@ class Brain:
         self._memory.remember(nodes=[node])
 
 
+# Stable, known fields (beyond a Fact's own ``text``) that make a Repo/Project/Person/
+# PR/Owner-shaped graph hit legible in the prompt. Deliberately excludes anything
+# recall_hybrid's fusion adds (``_recall_source``) and the semantic ``distance`` —
+# neither is prompt content; both are debug-only (see vector.py's recall_hybrid).
+_KNOWN_HIT_FIELDS: tuple[str, ...] = ("name", "summary", "status", "gh_handle", "title", "state")
+
+
+def _hit_prompt_text(hit: dict[str, object]) -> str | None:
+    """Render one recalled hit as one concise prompt line, or ``None`` to omit it.
+
+    A Fact's own ``text`` is preferred verbatim (unchanged behaviour). Every other
+    node shape recall can return carries no ``text`` — the graph-only bug this fixes
+    (a Repo/Project/Person/Owner hit used to just vanish from ``_assemble``) — so the
+    line is built from whichever of the stable, known fields are present, falling
+    back to the bare id when none are, and omitted entirely when the hit is empty.
+    """
+    text = hit.get("text")
+    if text:
+        return str(text)
+
+    label = str(hit.get("label") or "")
+    parts = [str(hit[field]) for field in _KNOWN_HIT_FIELDS if hit.get(field)]
+    if not parts:
+        node_id = hit.get("id")
+        if not node_id:
+            return None
+        parts = [str(node_id)]
+    body = ": ".join(parts) if len(parts) > 1 else parts[0]
+    return f"{label} {body}".strip() if label else body
+
+
 def _assemble(
     utterance: str,
     recalled: list[dict[str, object]],
@@ -425,9 +477,8 @@ def _assemble(
     on every single turn: a guaranteed miss, paying the write premium forever and never
     reading. Keeping the preamble byte-stable is what makes the breakpoint worth having.
     """
-    facts = "\n".join(
-        f"- {hit.get('text')}" for hit in recalled if hit.get("text")
-    )
+    lines = (_hit_prompt_text(hit) for hit in recalled)
+    facts = "\n".join(f"- {line}" for line in lines if line)
     user_content = f"Recalled facts:\n{facts}\n\n{utterance}" if facts else utterance
     return [
         {"role": "system", "content": system_preamble},

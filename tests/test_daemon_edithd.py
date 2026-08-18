@@ -20,6 +20,7 @@ Asserted:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import stat
 import tempfile
 import threading
@@ -31,6 +32,7 @@ import pytest
 
 from edith.daemon.client import ControlClient
 from edith.daemon.edithd import EdithDaemon, Secrets, resolve_secrets
+from edith.daemon.state import VoiceHealth
 from edith.router import ModelResponse, Tier
 
 
@@ -114,7 +116,26 @@ async def test_status_over_socket_after_startup(data_dir):
     assert resp["ok"] is True
     status = cast(dict[str, object], resp["status"])
     assert status["state"] == "running"
+    # LOCKED shape — exactly the original four keys; voice_health moved to the
+    # opt-in `status_v2` command (round 4 review) — see test_status_v2_over_socket_*.
     assert set(status) == {"state", "active_skill", "budget_used", "last_event"}
+
+
+async def test_status_v2_over_socket_after_startup(data_dir):
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+    await daemon.start()
+    try:
+        resp = await ControlClient(daemon.socket_path).send({"cmd": "status_v2"})
+    finally:
+        await daemon.stop()
+
+    assert resp["ok"] is True
+    status = cast(dict[str, object], resp["status"])
+    assert status["state"] == "running"
+    assert set(status) == {
+        "state", "active_skill", "budget_used", "last_event", "voice_health",
+    }
+    assert status["voice_health"] == "healthy"
 
 
 async def test_pause_via_control_api_makes_brain_skip_model_call(data_dir):
@@ -545,6 +566,178 @@ async def test_stop_cancels_the_graph_refresh_task(data_dir):
     task = daemon._graph_refresh_task
     assert task is not None
     await daemon.stop()
+    assert daemon._graph_refresh_task is None
     await _wait_until(lambda: task.cancelled())  # cancellation is processed asynchronously
 
-    assert daemon._graph_refresh_task is None
+
+# ---------------------------------------------------------------------------
+# _on_voice_task_done — voice-loop observability (bounded resilience fix). The
+# PortAudio retry lives inside the audio loop itself (edith.voice.live); this
+# callback only makes an ESCAPED, unexpected exception observable via the
+# Control API, without respawning. Exercised directly against manually-built
+# tasks — no mic, no daemon start()/stop() needed.
+# ---------------------------------------------------------------------------
+
+
+async def test_voice_task_exception_logs_and_sets_last_event_voice_failed(data_dir):
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+
+    async def _boom() -> None:
+        raise RuntimeError("simulated voice loop crash")
+
+    task = asyncio.create_task(_boom())
+    with contextlib.suppress(RuntimeError):
+        await task
+
+    daemon._on_voice_task_done(task)  # noqa: SLF001
+
+    assert daemon.state.last_event == "voice.failed"
+    assert daemon.state.voice_health is VoiceHealth.FAILED
+
+
+async def test_voice_task_normal_completion_does_not_set_failed(data_dir):
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+
+    async def _ok() -> None:
+        return None
+
+    task = asyncio.create_task(_ok())
+    await task
+
+    daemon._on_voice_task_done(task)  # noqa: SLF001
+
+    assert daemon.state.last_event != "voice.failed"
+
+
+async def test_voice_task_cancellation_does_not_set_failed(data_dir):
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+
+    async def _forever() -> None:
+        await asyncio.sleep(100)
+
+    task = asyncio.create_task(_forever())
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    daemon._on_voice_task_done(task)  # noqa: SLF001
+
+    assert daemon.state.last_event != "voice.failed"
+
+
+# ---------------------------------------------------------------------------
+# voice_health — sticky voice-loop health (round 2 review). A dedicated field on
+# RuntimeState, surfaced via Control API status, that unrelated last_event/
+# session/graph-refresh writes must never clear.
+# ---------------------------------------------------------------------------
+
+
+async def test_voice_health_stays_failed_after_unrelated_last_event_writes(data_dir):
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+
+    async def _boom() -> None:
+        raise RuntimeError("simulated voice loop crash")
+
+    task = asyncio.create_task(_boom())
+    with contextlib.suppress(RuntimeError):
+        await task
+    daemon._on_voice_task_done(task)  # noqa: SLF001
+    assert daemon.state.voice_health is VoiceHealth.FAILED
+
+    # Session narration and graph-refresh both write last_event constantly — neither
+    # may clear the sticky voice failure as a side effect.
+    daemon.state.last_event = "graph_refresh.started"
+    assert daemon.state.voice_health is VoiceHealth.FAILED
+    daemon.state.last_event = "session.transition"
+    assert daemon.state.voice_health is VoiceHealth.FAILED
+
+
+async def test_status_v2_over_socket_surfaces_voice_health_after_failure(data_dir):
+    daemon = _daemon(data_dir, SpyMemory(), FakeRouter())
+    await daemon.start()
+    try:
+        async def _boom() -> None:
+            raise RuntimeError("simulated voice loop crash")
+
+        task = asyncio.create_task(_boom())
+        with contextlib.suppress(RuntimeError):
+            await task
+        daemon._on_voice_task_done(task)  # noqa: SLF001
+
+        resp = await ControlClient(daemon.socket_path).send({"cmd": "status_v2"})
+    finally:
+        await daemon.stop()
+
+    status = cast(dict[str, object], resp["status"])
+    assert status["voice_health"] == "failed"
+
+
+async def test_start_voice_loop_resets_voice_health_to_healthy(data_dir, monkeypatch):
+    """A fresh voice-loop start must reset a sticky failure from a prior run — no
+    real audio stack involved (run_live_loop is monkeypatched to a no-op)."""
+
+    async def _fake_run_live_loop(
+        voice_io, *, wake_model, wake_threshold, followup_seconds, stop  # noqa: ANN001
+    ) -> None:
+        await asyncio.sleep(100)  # stays "running" until stop()/cancel tears it down
+
+    monkeypatch.setattr("edith.voice.live.run_live_loop", _fake_run_live_loop)
+
+    class _FakeVoice:
+        async def speak(self, text: str) -> None:
+            return None
+
+        async def speak_response(self, text: str) -> None:
+            return None
+
+        def set_paused(self, paused: bool) -> None:
+            return None
+
+    daemon = EdithDaemon(
+        data_dir=data_dir,
+        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        memory=SpyMemory(),
+        router=FakeRouter(),
+        voice=_FakeVoice(),
+        enable_voice=True,
+    )
+    daemon.state.mark_voice_failed()  # simulate a failure from a previous run
+    await daemon.start()
+    try:
+        assert daemon.state.voice_health is VoiceHealth.HEALTHY
+    finally:
+        await daemon.stop()
+
+
+# ---------------------------------------------------------------------------
+# stop() joining an already-failed voice task must not abort shutdown. The
+# done callback above already reported the exception; re-raising it from the
+# asyncio.wait_for join would abort Memory/Kuzu close, the reasoner, SecureStore
+# and Control API teardown, and skip _stopped.set() — breaking the degraded-
+# but-manageable voice-failure contract (Fix round 1).
+# ---------------------------------------------------------------------------
+
+
+async def test_stop_swallows_already_failed_voice_task_and_completes_shutdown(data_dir):
+    memory = SpyMemory()
+    daemon = _daemon(data_dir, memory, FakeRouter())
+    await daemon.start()
+
+    async def _boom() -> None:
+        raise RuntimeError("simulated voice loop crash")
+
+    task = asyncio.create_task(_boom())
+    with contextlib.suppress(RuntimeError):
+        await task
+    daemon._on_voice_task_done(task)  # noqa: SLF001 — as the real done-callback would
+
+    # Simulate the voice loop having already been running (and having failed) —
+    # no real mic/audio stack involved.
+    daemon._voice_task = task  # noqa: SLF001
+    daemon._voice_stop = threading.Event()  # noqa: SLF001
+
+    await daemon.stop()  # must not raise the task's RuntimeError
+
+    assert daemon._stopped.is_set()  # noqa: SLF001
+    assert memory.closed
+    assert daemon._control is None  # noqa: SLF001 — Control API socket cleanup finished
