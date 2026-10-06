@@ -13,7 +13,7 @@ Guard is the north-star §6 cross-cutting enforcement point. Its three duties ar
 **redact**, **authorize**, and **budget**. This slice ships `authorize` and the token
 budget as one headless policy object (`edith/guard/guard.py`). Redaction (§6.1) is
 already owned by `edith.memory.secrets.sanitize_text` and enforced at the Router's
-outbound choke-point (`bifrost.py::_redact_messages`); Guard does **not** duplicate it.
+outbound choke-point (`gateway.py::_redact_messages`); Guard does **not** duplicate it.
 
 Guard is **pure**: no I/O, no model calls, no bus. This keeps its policy trivially
 testable and lets it be constructed once and injected wherever a decision or a counter
@@ -43,7 +43,7 @@ class Guard:
     def budget_used(self) -> int: ...                 # tokens used this window
 ```
 
-`Tier` is imported from `edith.router.tiers` (the same internal import `bifrost.py`
+`Tier` is imported from `edith.router.tiers` (the same internal import `gateway.py`
 uses; no cycle since `tiers` imports nothing back).
 
 ## Autonomy gate policy (§6.3)
@@ -89,7 +89,7 @@ caught within a day. The exact number is a config knob; the governance is the po
 Guard is built as an isolated unit. Two integration touchpoints were **deliberately not
 done here** — the lead wires them after this lands:
 
-1. **Router (`edith/router/bifrost.py`)** — construct `Router` with
+1. **Router (`edith/router/gateway.py`)** — construct `Router` with
    `budget_check=guard.budget_check` (it already declares the
    `BudgetCheck = Callable[[Tier], bool]` seam, defaulting to allow-all), and call
    `guard.record(resp.input_tokens, resp.output_tokens)` after each `model_call` so the

@@ -16,7 +16,7 @@
 | **edithd** | The daemon process that runs everything under the hood. |
 | **bus** | In-process event/message bus; components `publish`/`subscribe`. |
 | **Guard** | Cross-cutting enforcement: `redact`, `authorize` (allow/ask/deny), budget. |
-| **Router** | `model_call(messages, tier_hint) -> response` over the Bifrost adapter. |
+| **Router** | `model_call(messages, tier_hint) -> response` over the gateway adapter. |
 | **Memory** | Graph + vector store: `recall` / `remember` / `compact`. |
 | **SessionBus** | Watches OMC / Claude Code terminals → `session.event` / `session.state`. |
 | **Skill** | Capability with `name`, `triggers`, `needs_confirmation`, `run(context)->result`. |

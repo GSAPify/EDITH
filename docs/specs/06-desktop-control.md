@@ -16,7 +16,7 @@
 | **edithd** | The daemon process that runs everything under the hood. |
 | **bus** | In-process event/message bus; components `publish`/`subscribe`. |
 | **Guard** | Cross-cutting enforcement: `redact`, `authorize` (allow/ask/deny), budget. |
-| **Router** | `model_call(messages, tier_hint) -> response` over the Bifrost adapter. |
+| **Router** | `model_call(messages, tier_hint) -> response` over the gateway adapter. |
 | **Memory** | Graph + vector store: `recall` / `remember` / `compact`. |
 | **Skill** | Capability with `name`, `triggers`, `needs_confirmation`, `run(context)->result`. |
 | **tier** | Model size class the Router selects: haiku / sonnet / opus. |

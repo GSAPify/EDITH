@@ -17,7 +17,7 @@
 | **edithd** | The daemon process that runs everything under the hood. |
 | **bus** | In-process event/message bus; components `publish`/`subscribe`. |
 | **Guard** | Cross-cutting enforcement: `redact`, `authorize` (allow/ask/deny), budget. |
-| **Router** | `model_call(messages, tier_hint) -> response` over the Bifrost adapter. |
+| **Router** | `model_call(messages, tier_hint) -> response` over the gateway adapter. |
 | **Memory** | Graph + vector store: `recall` / `remember` / `compact`. |
 | **Skill** | Capability with `name`, `triggers`, `needs_confirmation`, `run(context)->result`. |
 | **tier** | Model size class the Router selects: haiku / sonnet / opus. |
@@ -316,7 +316,7 @@ Deep review with opus is the most expensive call in the system. Gate it delibera
   call. Offer the option of reviewing only changed modules.
 - **No repeated opus calls** within one invocation — assemble all context first, then single
   call. Do not stream multiple partial reviews.
-- **Budget impact:** one PR review ≈ one expensive opus call. At typical Pattern/Bifrost
+- **Budget impact:** one PR review ≈ one expensive opus call. At typical gateway
   limits this is fine, but the Guard budget tracker should count it. Surface in `status`.
 
 ---
@@ -438,7 +438,7 @@ python -c "from edith.bus import publish; publish('voice.utterance', {'text': 'r
   `ruff check` clean, `pyright` 0 errors. Mandatory tests confirmed non-vacuous by reading
   source: `test_declined_never_posts` (confirm→False ⇒ `review_calls == []`) and
   `test_planted_secret_redacted_before_router` (asserts secrets present in raw diff, absent from
-  the Router payload). **LIVE smoke:** real `gh` + real Bifrost Opus against `patterninc/agents`
+  the Router payload). **LIVE smoke:** real `gh` + real Opus against `patterninc/agents`
   PR #2423 (kemenyc, +28/-2), `confirm=deny` — Opus produced a genuine review (caught a real
   always-on→toggle-gated regression), `posted=False`, and the recorded `gh` calls were exactly
   `pr list` + `pr diff` with **zero** `pr review` write.

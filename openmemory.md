@@ -17,7 +17,7 @@
 - `edith/memory/` combines an embedded Kuzu graph with sqlite-vec semantic recall. Kuzu is
   single-process: the daemon, viewer, finder, and ingest tools must not open the live graph
   concurrently.
-- `edith/router/` selects model tiers and sends redacted requests through Bifrost. Background
+- `edith/router/` selects model tiers and sends redacted requests through the gateway. Background
   reasoning stays off the live voice response path.
 - `edith/guard/` owns the desktop-action allowlist and windowed token budget. Redaction remains at
   model, TTS, bus, and persistence choke points.

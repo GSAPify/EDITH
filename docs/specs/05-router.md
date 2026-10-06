@@ -16,12 +16,12 @@
 | **edithd** | The daemon process that runs everything under the hood. |
 | **bus** | In-process event/message bus; components `publish`/`subscribe`. |
 | **Guard** | Cross-cutting enforcement: `redact`, `authorize` (allow/ask/deny), budget. |
-| **Router** | `model_call(messages, tier_hint) -> response` over the Bifrost adapter. |
+| **Router** | `model_call(messages, tier_hint) -> response` over the gateway adapter. |
 | **Memory** | Graph + vector store: `recall` / `remember` / `compact`. |
 | **SessionBus** | Watches OMC / Claude Code terminals → `session.event` / `session.state`. |
 | **Skill** | Capability with `name`, `triggers`, `needs_confirmation`, `run(context)->result`. |
 | **tier** | Model size class the Router selects: haiku / sonnet / opus. |
-| **Bifrost** | Pattern's Anthropic/OpenAI-compatible model gateway (provider-agnostic). |
+| **Gateway** | Any Anthropic/OpenAI-compatible model gateway (provider-agnostic). |
 | **latency masking** | Firing a fast model for an immediate ack while a slow model reasons in parallel. Two separate calls. Not one inference. |
 
 ---
@@ -29,7 +29,7 @@
 ## Purpose
 
 Router is EDITH's model-call gateway. It selects the cheapest model tier that can do the job
-(haiku / sonnet / opus), calls the Bifrost adapter, and owns the two-call latency-masking
+(haiku / sonnet / opus), calls the gateway adapter, and owns the two-call latency-masking
 mechanics — firing a fast haiku acknowledgement and a slow opus answer as two overlapping
 (but fully separate) calls so that TTS audio starts before the slow call finishes. Every model
 call in EDITH routes through this contract. Until this slice ships, callers use a single-tier
@@ -40,7 +40,7 @@ surface.
 
 **In:**
 - Tier selection logic (haiku / sonnet / opus) from `tier_hint` + internal heuristics.
-- Bifrost adapter (provider-agnostic; base_url + tier→model map from config).
+- Gateway adapter (provider-agnostic; base_url + tier→model map from config).
 - Two-call latency-masking mechanics (haiku ack + opus answer, overlapped).
 - Streaming: partial token delivery to callers (VoiceIO / TTS can start before completion).
 - Consulting Guard's budget check before escalating to opus.
@@ -132,7 +132,7 @@ it is used as-is unless the Router's own override rules fire (listed below the t
 
 ```
 ┌─────────────────────────────┬────────────────────────────────────────────┐
-│  tier_hint / signal          │  resolved tier → Bifrost model             │
+│  tier_hint / signal          │  resolved tier → gateway model             │
 ├─────────────────────────────┼────────────────────────────────────────────┤
 │  HAIKU                       │  haiku  (quick lookups, short acks, filler)│
 │  SONNET                      │  sonnet (standard tasks, skills, recall)   │
@@ -332,7 +332,7 @@ downgrade narration to "silent" (log only). Sonnet fires only on an interjection
 
 ## Streaming
 
-All Bifrost calls use the streaming API so partial tokens reach callers as they arrive.
+All gateway calls use the streaming API so partial tokens reach callers as they arrive.
 
 ```
 Router.model_call_stream()
@@ -351,19 +351,19 @@ TTS adapter starts synthesizing before full completion
 
 ---
 
-## Bifrost adapter
+## Gateway adapter
 
-Bifrost is Pattern's Anthropic/OpenAI-compatible gateway. The adapter is the thin layer that
+The gateway is any Anthropic/OpenAI-compatible endpoint. The adapter is the thin layer that
 translates Router's internal tier→model selection into an actual HTTP call.
 
 ### Configuration (`.env` / env vars — NOT the API key)
 
 ```
-BIFROST_BASE_URL=https://bifrost.pattern.com/v1
-BIFROST_PROVIDER=anthropic          # or: openai, azure — swap without code change
-BIFROST_MODEL_HAIKU=claude-haiku-4-5
-BIFROST_MODEL_SONNET=claude-sonnet-4-5
-BIFROST_MODEL_OPUS=claude-opus-4-5
+EDITH_GATEWAY_URL=https://gateway.example.com/v1
+EDITH_GATEWAY_PROVIDER=anthropic          # or: openai, azure — swap without code change
+EDITH_MODEL_HAIKU=claude-haiku-4-5
+EDITH_MODEL_SONNET=claude-sonnet-4-5
+EDITH_MODEL_OPUS=claude-opus-4-5
 ```
 
 **The API key is NOT in `.env`.** Per north-star §6.1 (non-negotiable), EDITH's own API key is
@@ -372,14 +372,14 @@ to disk or logs.
 
 ### Provider swap
 
-`BIFROST_PROVIDER` selects the request schema (Anthropic messages format vs. OpenAI chat
+`EDITH_GATEWAY_PROVIDER` selects the request schema (Anthropic messages format vs. OpenAI chat
 completions). Swapping the backend requires only `.env` changes and a new
-`BIFROST_MODEL_*` set — no Router code changes.
+`EDITH_MODEL_*` set — no Router code changes.
 
 ### Adapter interface
 
 ```python
-class BifrostAdapter:
+class GatewayAdapter:
     def complete(self, model: str, messages: list[dict], stream: bool) -> ...: ...
     def stream(self, model: str, messages: list[dict]) -> AsyncIterator[str]: ...
 ```
@@ -408,9 +408,9 @@ store it.
     Router can enforce the rules.
 - **Libraries:**
   - `anthropic` Python SDK (streaming, messages API) — or `openai` SDK depending on provider.
-  - `keyring` — retrieve Bifrost API key from macOS Keychain.
+  - `keyring` — retrieve gateway API key from macOS Keychain.
   - `asyncio` — overlapped calls in `model_call_masked`, async streaming.
-  - `python-dotenv` — load `BIFROST_*` config from `.env`.
+  - `python-dotenv` — load `EDITH_GATEWAY_*` config from `.env`.
 
 ---
 
@@ -421,7 +421,7 @@ Defers to north-star §5 for all stack-wide choices. Additions for this slice:
 | Choice | Justification |
 |--------|---------------|
 | `asyncio.gather` for two-call overlap | Keeps the process single-threaded; both calls are I/O-bound (HTTP). No thread pool needed. |
-| Anthropic SDK streaming (`stream=True`) | Native async generator; pairs cleanly with `AsyncIterator[ModelChunk]` contract. Swap to `openai` SDK when `BIFROST_PROVIDER=openai`. |
+| Anthropic SDK streaming (`stream=True`) | Native async generator; pairs cleanly with `AsyncIterator[ModelChunk]` contract. Swap to `openai` SDK when `EDITH_GATEWAY_PROVIDER=openai`. |
 | `.env` for model-name config | Tier→model names change with each model generation. Config, not code. |
 | Keychain (not `.env`) for API key | Non-negotiable per north-star §6.1. |
 
@@ -433,7 +433,7 @@ Defers to north-star §5 for all stack-wide choices. Additions for this slice:
   authorized. The autonomy gate (north-star §6.3) fires in Brain/Guard *before* Router is
   invoked; Router itself is AUTO with no confirmation surface.
 - **Secrets:**
-  - Bifrost API key: Keychain only (`keyring.get_password`). Never in `.env`, never in logs,
+  - gateway API key: Keychain only (`keyring.get_password`). Never in `.env`, never in logs,
     never on the bus.
   - `Guard.redact(messages)` is the first operation inside every `model_call*` method.
     Outbound payloads are redacted before the HTTP call fires. No exceptions.
@@ -461,7 +461,7 @@ only for events that Brain + Guard have already approved. Within Router's scope:
 
 ## Build steps (high-level, ordered)
 
-1. Implement `BifrostAdapter` — reads config from `.env`, retrieves API key from Keychain,
+1. Implement `GatewayAdapter` — reads config from `.env`, retrieves API key from Keychain,
    exposes `complete()` and `stream()`.
 2. Implement `Tier` enum and the tier→model config map.
 3. Implement `model_call()` — `Guard.redact()` first, tier selection, adapter call, return
@@ -471,7 +471,7 @@ only for events that Brain + Guard have already approved. Within Router's scope:
    add `Guard.budget_check()` gate before opus escalation.
 6. Implement `model_call_masked()` — `asyncio.gather` on haiku ack + opus answer, return
    `(haiku_stream, opus_task)`.
-7. Wire the adapter's provider-swap path (`BIFROST_PROVIDER` env var selects SDK).
+7. Wire the adapter's provider-swap path (`EDITH_GATEWAY_PROVIDER` env var selects SDK).
 8. Write unit tests covering tier routing and latency-masking overlap (see Verification).
 9. Integrate with Brain: replace the single-tier passthrough used by slices 1–4.
 
@@ -488,12 +488,12 @@ Two properties to prove at build time:
 pytest tests/router/test_tier_selection.py -v
 
 # Expected: all rows pass
-# HAIKU hint → BIFROST_MODEL_HAIKU
-# SONNET hint → BIFROST_MODEL_SONNET
-# OPUS hint → BIFROST_MODEL_OPUS (when Guard.budget_check returns allow)
-# OPUS hint + budget_check=deny → BIFROST_MODEL_SONNET + budget_limited=True
-# HAIKU hint + task_type=code_review → BIFROST_MODEL_OPUS (override)
-# HAIKU hint + task_type=ack_filler → BIFROST_MODEL_HAIKU (no override)
+# HAIKU hint → EDITH_MODEL_HAIKU
+# SONNET hint → EDITH_MODEL_SONNET
+# OPUS hint → EDITH_MODEL_OPUS (when Guard.budget_check returns allow)
+# OPUS hint + budget_check=deny → EDITH_MODEL_SONNET + budget_limited=True
+# HAIKU hint + task_type=code_review → EDITH_MODEL_OPUS (override)
+# HAIKU hint + task_type=ack_filler → EDITH_MODEL_HAIKU (no override)
 ```
 
 ### 2. Latency masking — ack starts before opus completes
@@ -501,7 +501,7 @@ pytest tests/router/test_tier_selection.py -v
 ```bash
 pytest tests/router/test_latency_masking.py -v
 
-# Test: call model_call_masked() against a mock Bifrost that delays the opus response 1 s
+# Test: call model_call_masked() against a mock gateway that delays the opus response 1 s
 # Assert: first haiku token arrives before the opus response is complete
 # Assert: both calls fired (two requests logged by the mock adapter)
 # Assert: haiku stream and opus task returned as separate objects (not merged)
@@ -513,7 +513,7 @@ pytest tests/router/test_latency_masking.py -v
 1. Trigger a voice command that requires an opus answer (e.g. "review Tavishi's PR").
 2. Listen: ack audio ("Sure, let me take a look at that") should start within ~300 ms.
 3. Real answer audio should follow 2–5 s later without a silence gap.
-4. Check logs: two Bifrost requests logged for the interaction, not one.
+4. Check logs: two gateway requests logged for the interaction, not one.
 ```
 
 ---
@@ -533,9 +533,9 @@ pytest tests/router/test_latency_masking.py -v
 - **Narrator step-boundary detection:** How does the narrator decide a "reasoning step"
   boundary to sample on (token count? punctuation/paragraph? opus thinking-block markers)?
   Prototype during Slice 5 build; start with a simple N-token/again-on-pause heuristic.
-- **Model version pinning:** `BIFROST_MODEL_*` maps to named model strings. Should these be
+- **Model version pinning:** `EDITH_MODEL_*` maps to named model strings. Should these be
   pinned to specific versions (e.g. `claude-haiku-4-5-20251001`) to avoid silent behavior
-  changes on Bifrost updates? Decide at Slice 5 build time.
+  changes on gateway updates? Decide at Slice 5 build time.
 - **Streaming back-pressure:** If TTS is slow and the token queue grows, does Router need a
   back-pressure mechanism or is asyncio's natural flow control sufficient? Verify empirically
   during Slice 3 integration.
@@ -558,7 +558,7 @@ pytest tests/router/test_latency_masking.py -v
     OPUS hint honored but budget-gated (deny → Sonnet + `budget_limited=True`); hint=None →
     Sonnet (the live voice), or Haiku for small cheap lookups, and a deep signal sets
     `suggest_background` (Sonnet holds the live turn; opus goes background — deferred).
-  - `edith/router/bifrost.py`: `Router` gains `budget_check` + `redactor` seams (default
+  - `edith/router/gateway.py`: `Router` gains `budget_check` + `redactor` seams (default
     allow + `sanitize_text`). `model_call` unchanged in behaviour but now redacts + resolves the
     tier first. `model_call_stream` parses the Anthropic SSE (`content_block_delta` text +
     `message_start`/`message_delta` usage) and yields `ModelChunk`s. `model_call_masked` fires
@@ -575,19 +575,19 @@ pytest tests/router/test_latency_masking.py -v
   - Redaction moved INTO Router as the unbypassable choke-point (Brain still redacts too — safe).
 
 - **Deviations from spec + why:**
-  - Build steps 7 (OpenAI provider-swap) deferred — Bifrost is Anthropic-compatible today; the
-    `BIFROST_PROVIDER` seam is config-only, no second SDK path built.
-  - `Tier` enum relocated from `bifrost.py` to `tiers.py` (import-cycle break); re-exported from
+  - Build steps 7 (OpenAI provider-swap) deferred — the gateway is Anthropic-compatible today; the
+    `EDITH_GATEWAY_PROVIDER` seam is config-only, no second SDK path built.
+  - `Tier` enum relocated from `gateway.py` to `tiers.py` (import-cycle break); re-exported from
     `edith.router`, so all callers are unaffected.
 
 - **Files created / changed:** NEW `edith/router/tiers.py`, `tests/test_router_tiers.py`,
-  `tests/test_router_stream.py`. CHANGED `edith/router/bifrost.py` (ModelChunk, streaming, masking,
+  `tests/test_router_stream.py`. CHANGED `edith/router/gateway.py` (ModelChunk, streaming, masking,
   seams; `Tier` now imported from tiers), `edith/router/__init__.py` (exports).
 
 - **Verification / tests run + results:** **212 passed, 1 skipped** (+ the router live smokes);
   ruff + pyright clean. New: 10 tier-selection tests, 7 streaming/masking/redaction tests. Masking
   test proves TRUE overlap (2 requests issued before draining). **LIVE-smoked: `model_call_stream`
-  against REAL Bifrost (`--run-live`) yielded real tokens with a correct final chunk** — the SSE
+  against the REAL gateway (`--run-live`) yielded real tokens with a correct final chunk** — the SSE
   parser is verified against the actual event stream, not just the mock.
 
 - **Follow-ups / known gaps:**
@@ -602,4 +602,4 @@ pytest tests/router/test_latency_masking.py -v
     `VoiceIO.speak_stream` + an `edithd` composition root; the mechanics are unit- and live-tested,
     but the end-to-end "ack audio then answer audio" is owner-smoke once those exist.
   - **Guard** still deferred: `budget_check` defaults to allow, redaction uses `sanitize_text`.
-  - `BIFROST_MODEL_*` version pinning + OpenAI provider path: config seams, not built.
+  - `EDITH_MODEL_*` version pinning + OpenAI provider path: config seams, not built.

@@ -19,7 +19,7 @@ Give EDITH two abilities over the ingested Memory graph (spec 08):
 
 1. **NL repo finder** — `find_repos(query, store, k)` answers "which of my repos does X?" by
    fusing semantic + graph search and ranking the owner's repos. A CLI (`python -m edith.finder
-   "…"`) prints the ranking and, with Bifrost env present, a one-line Sonnet summary.
+   "…"`) prints the ranking and, with gateway env present, a one-line Sonnet summary.
 2. **Real-time resolve-on-miss** — the owner's key requirement. When EDITH is asked about a repo
    NOT in the graph, `resolve_repo` locates it (local clone or `gh`), redacts, answers FAST with
    Sonnet now, and schedules a BACKGROUND Opus deep-extract → `remember` so the next mention is an
@@ -97,7 +97,7 @@ in-memory dataclasses.
 1. `finder.py` — `find_repos` (semantic+graph fuse → Repo walk → rank) + `summarize_hits`.
 2. `resolve.py` — `resolve_repo`: hit-check (`repo-<name>`), locate (local clone / `gh` README),
    redact, fast Sonnet answer, background Opus `_deep_extract` reusing `extract_repo`+`map_and_remember`.
-3. `__main__.py` — the `python -m edith.finder "…"` CLI (ranking always; Sonnet summary if Bifrost
+3. `__main__.py` — the `python -m edith.finder "…"` CLI (ranking always; Sonnet summary if gateway
    env present), mirroring `edith/ingest/__main__.py`.
 4. `edith/brain/loop.py` — thin resolve-on-miss hook: on a recall MISS + a repo mention + an injected
    resolver, resolve then fold the fast answer into the working context; schedule the background job.
@@ -111,7 +111,7 @@ in-memory dataclasses.
   Brain hook (miss invokes resolver + answers; recall-hit skips it; default no-resolver unchanged).
 - `ruff check edith tests` + `pyright edith` — clean.
 - Live smoke: `python -m edith.finder "<query>" --data-dir <temp>` after a tiny `run_ingest` into a
-  temp dir (1 repo, real gh/Bifrost, small `--max-tokens`) — prints the ranking (+ Sonnet summary),
+  temp dir (1 repo, real gh/gateway, small `--max-tokens`) — prints the ranking (+ Sonnet summary),
   redacted.
 
 ## The decisions (chosen defaults)

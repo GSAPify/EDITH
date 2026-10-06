@@ -38,9 +38,8 @@ removes that "typing + re-giving-context" layer.
 
 ### Decisions (LOCKED unless a spec-review gate reopens them)
 
-1. **Model backend — Bifrost (Anthropic-compatible proxy).**
-   Owner supplies base_url + API key with generous limits (Pattern's Bifrost gateway; note
-   `brain-platform` / bifrost repos exist in `~/gitstuff`). Router picks haiku / sonnet / opus
+1. **Model backend: an Anthropic-compatible gateway.**
+   Owner supplies base_url + API key with generous limits. Router picks haiku / sonnet / opus
    over the single endpoint. Provider-agnostic adapter so the backend can be swapped via `.env`.
    Cost is "covered by proxy limits" but NOT infinite → see cost governance below.
 
@@ -69,12 +68,12 @@ removes that "typing + re-giving-context" layer.
 ### Cross-cutting requirements the spec MUST answer (raised in review)
 
 - **Secrets boundary 🔒** — EDITH will read owner's CLAUDE.md, which contains LIVE OAuth tokens +
-  client secrets (a real example of the risk). "Store everything" + persistent DB + Bifrost
+  client secrets (a real example of the risk). "Store everything" + persistent DB + the gateway
   calls = creds could be persisted and sent over the wire. Spec must define: never-persist list,
   redact-before-model-call, secrets in macOS Keychain, DB encrypted at rest.
 - **Cost / token governance** — an always-on daemon narrating every terminal is a textbook silent
   token-burner. Spec a budget + per-event gating (which events deserve a model call vs. handled
-  locally), even with generous Bifrost limits.
+  locally), even with generous gateway limits.
 - **Honest framing (no unicorns)** — "unlimited context" = memory + retrieval + compaction.
   "Two agents in one inference / haiku talks while opus thinks" = **orchestration of two calls**
   (fast model masks latency of the slow one), NOT a single inference. Say so in the specs.
@@ -94,7 +93,7 @@ menu bar: EDITH [pause][kill]  ← only visible surface
    │ controls (unix socket / localhost)
    ▼
 edithd (native, uv py3.11+)
-  VOICE ─► BRAIN/ORCHESTRATOR ─► ROUTER ─► Bifrost (haiku/sonnet/opus)
+  VOICE ─► BRAIN/ORCHESTRATOR ─► ROUTER ─► gateway (haiku/sonnet/opus)
               ├─ MEMORY (graph + vector, local, encrypted)
               ├─ SESSION BUS (watch OMC/CC terminals)
               ├─ SKILLS (PR review, Airflow, Slack, desktop)
@@ -130,7 +129,7 @@ during authoring:
 only (budget discipline). A single giant Write in the main thread timed out earlier — lesson:
 chunk writes / delegate authoring. Commit-early-and-often saved the session after that timeout.
 
-**Next session (Session 2):** build **Slice 1 (Memory + Brain)**. Needs Bifrost base_url + key.
+**Next session (Session 2):** build **Slice 1 (Memory + Brain)**. Needs gateway base_url + key.
 
 <!-- Next sessions append below this line -->
 
@@ -144,7 +143,7 @@ right failure → minimal green → refactor. Real embedded Kuzu 0.11.3, no mock
 ### What shipped (all green)
 - **Project scaffold** — `uv` project, Python 3.11.14, `kuzu`; dev `pytest`/`ruff`/`pyright`
   all configured in `pyproject.toml` with `.venv` excluded from ruff+pyright. `.env.example`
-  with Bifrost placeholders (no real secrets). Package `edith/memory/` + `tests/`.
+  with gateway placeholders (no real secrets). Package `edith/memory/` + `tests/`.
 - **Graph store** (`store.py`) — Owner/Project/Repo/Person/Fact nodes +
   `works_on`/`owns`/`knows`/`relates_to` edges. `remember` (idempotent upsert),
   `recall` (substring anchor match + 1-hop `relates_to` traversal). Sync (documented).
@@ -184,7 +183,7 @@ step 3 was unblocked. Committed after each green step (data-loss insurance).
 ### Next session (Session 3)
 Continue Slice 1: Brain loop skeleton (bus + recall→decide→remember, Router passthrough),
 then edithd lifecycle + Control API. Add Session/Conversation node tables, then `compact()`.
-Get the vector re-index decision (build-once vs sqlite-vec) and Bifrost creds from owner.
+Get the vector re-index decision (build-once vs sqlite-vec) and gateway creds from owner.
 
 ---
 
@@ -237,11 +236,11 @@ text for the recall shape), written in the same `remember()` as the vector row a
 ### Next session (Session 4)
 Continue Slice 1: Brain loop skeleton (bus + recall→decide→remember, Router passthrough), then
 edithd lifecycle + Control API. Add Session/Conversation node tables, then `compact()`.
-Vector re-index blocker is now RESOLVED (sqlite-vec incremental). Still need Bifrost creds.
+Vector re-index blocker is now RESOLVED (sqlite-vec incremental). Still need gateway creds.
 
 ---
 
-## Session 4 — 2026-07-06 — Slice 1: bus + Router/Bifrost adapter + Brain loop (strict TDD)
+## Session 4 — 2026-07-06 — Slice 1: bus + Router/gateway adapter + Brain loop (strict TDD)
 
 Built the three components that turn the Memory store into a working core loop, each red→green
 on `build/slice-1-memory-brain`. Baseline was **14 passed** (docs said 13; reconciled
@@ -252,7 +251,7 @@ In-process async pub/sub, north-star envelope `Event{topic, ts, source, payload}
 `async publish` awaits all matching handlers via `asyncio.gather` (deterministic, no
 `sleep(0)` flakiness), topic-filters, no-ops with no subscribers. 4 tests, RED on missing module.
 
-### 2. Router + Bifrost adapter (`edith/router/`)
+### 2. Router + gateway adapter (`edith/router/`)
 `async model_call(messages, tier_hint) -> ModelResponse` over the Anthropic-compatible gateway
 (`POST {base}/v1/messages`). `httpx.AsyncClient` **constructor-injected** → `MockTransport` seam
 tests request construction / response parse / tier→model map with **no live call**. Retries via
@@ -260,8 +259,8 @@ tests request construction / response parse / tier→model map with **no live ca
 `reraise=True`); **4xx raises immediately** — both directions tested (503-then-200 → 2 calls;
 400 → 1 call, raises). One `@pytest.mark.live` smoke (skipped by default; `.env` loaded only on
 the `--run-live` path so the billable call never fires on a plain `pytest` — cost rule) hit real
-Bifrost: **200, non-empty text, max_tokens=8**. Model ids = the task's verified defaults. 6 unit
-+ 1 live. Added `BIFROST_MODEL_*` to `.env.example` + the real gitignored `.env`.
+Gateway: **200, non-empty text, max_tokens=8**. Model ids = the task's verified defaults. 6 unit
++ 1 live. Added `EDITH_MODEL_*` to `.env.example` + the real gitignored `.env`.
 
 ### 3. Brain loop (`edith/brain/`)
 Core loop on `voice.utterance`: `recall` → assemble (preamble + recalled facts + utterance) →
@@ -290,7 +289,7 @@ real bus.
 ### Next session (Session 5)
 **`edithd` daemon lifecycle + Control API** (unix-socket `pause`/`resume`/`kill`/`status`,
 launchd plist, encrypted-volume mount, pause-suspends-Memory). Then `compact()` (needs
-Session/Conversation node tables + working-context buffer) and **Guard**. Rotate the Bifrost key.
+Session/Conversation node tables + working-context buffer) and **Guard**. Rotate the gateway key.
 
 ---
 
@@ -346,7 +345,7 @@ high: specific excepts, `CancelledError` re-raised, honest seams, imports at top
 
 ### Next session (Session 6)
 **Slice 2 — PR-review skill** (`docs/specs/02-pr-review-skill.md`): first real autonomous action,
-exercises the Skill dispatch path. Standing housekeeping: rotate the Bifrost key; merge
+exercises the Skill dispatch path. Standing housekeeping: rotate the gateway key; merge
 `spec/session-1-foundation` to establish `main`.
 
 ---
@@ -438,7 +437,7 @@ FAKE tokens only. Re-run smoke secret-scan reads clean.
 dir; secret-scan (`GOCSPX-`/`1//0g`/`sk-`/`-----BEGIN`) = NONE.
 
 ### How to run the full ingest
-`python -m edith.ingest` (env: BIFROST_BASE_URL/API_KEY/MODEL_*). Preview with `--dry-run`.
+`python -m edith.ingest` (env: EDITH_GATEWAY_URL/API_KEY/MODEL_*). Preview with `--dry-run`.
 Full contributed-repos run is orchestrator-gated pending review.
 
 ### Notes / seams
@@ -470,7 +469,7 @@ New package `edith/finder/`:
   model, no task). `ResolveResult.background` is a coroutine the caller runs via
   `asyncio.create_task` — Slice-5 `think_async` will formalize the seam.
 - `__main__.py` — `python -m edith.finder "query" [--k] [--data-dir] [--max-tokens]`; prints the
-  ranking always, adds a Sonnet summary when Bifrost env is present. Mirrors `ingest/__main__.py`.
+  ranking always, adds a Sonnet summary when gateway env is present. Mirrors `ingest/__main__.py`.
 
 `edith/brain/loop.py` — thin resolve-on-miss hook: on a recall MISS + a `<name> repo` mention +
 an INJECTED resolver (constructor arg `resolve_repo`, default `None` = no-op), Brain resolves,
@@ -495,7 +494,7 @@ Spec `docs/specs/09-nl-finder.md`.
 
 ### Verification
 110 tests green (1 live-skipped), `ruff check edith tests` clean, `pyright edith` 0 errors.
-Live smoke: ingested `agentsmith` (real Bifrost, relevance 0.72, Opus deep) into a TEMP dir, then
+Live smoke: ingested `agentsmith` (real gateway, relevance 0.72, Opus deep) into a TEMP dir, then
 `python -m edith.finder "AI agent" --data-dir <temp>` ranked it #1 (score 1.600, degree 1) with a
 real Sonnet summary; `resolve_repo("agentsmith", …)` returned HIT with no model call. Secret-scan
 of new code/spec = NONE. Temp dir cleaned.
@@ -536,10 +535,10 @@ so the never-persist guarantee holds on the vector path too.
 
 ### Fix 2 — Backfill the live graph WITHOUT model calls
 `VectorMemoryStore.backfill_embeddings()` reads every `Fact` from the Kuzu graph and embeds those
-missing from `fact_map`, using the LOCAL fastembed embedder only — NO Bifrost/model calls.
+missing from `fact_map`, using the LOCAL fastembed embedder only — NO gateway/model calls.
 Idempotent (skips Facts already embedded, returns count inserted). `sanitize_text` runs first on
 each text (defence-in-depth). New CLI branch `python -m edith.ingest --reembed [--data-dir PATH]`
-is credential-free — it does NOT hit the `BIFROST_*` gate that the normal ingest path enforces.
+is credential-free — it does NOT hit the `EDITH_GATEWAY_*` gate that the normal ingest path enforces.
 - RED test: `test_backfill_embeds_graph_only_facts_idempotently` — seed graph-only via plain
   `MemoryStore`, assert `semantic_recall == []`, backfill embeds 1, recall finds it, second
   backfill returns 0.
@@ -581,7 +580,7 @@ No code. Housekeeping + kickoff before a context compaction.
 - **Live graph confirmed:** `~/.edith/data/memory.kuzu` = 206 nodes (23 Repo · 26 Person · 12 Project ·
   145 Fact, embedded), secret-scan clean. Viewer serves it at `:8765`.
 - **Next: Slice 2 (PR-review)** on `build/slice-2-pr-review` (cut off `master`). Full kickoff brief +
-  gotchas are in `STATE.md` §"▶ SLICE 2". Standing item: **rotate the Bifrost key.**
+  gotchas are in `STATE.md` §"▶ SLICE 2". Standing item: **rotate the gateway key.**
 
 ---
 
@@ -629,14 +628,14 @@ message is assembled (`test_planted_secret_redacted_before_router`, non-vacuous)
 - Migration verified non-destructive on the LIVE DB: 26 Person / 23 Repo / 145 Fact intact,
   existing names preserved, `gh_handle` column present. (Had to `lsof -ti tcp:8765 | xargs kill`
   the viewer first — Kuzu single-process lock, again.)
-- **LIVE smoke:** real `gh` + real Bifrost Opus on `patterninc/agents#2423` (kemenyc, +28/-2),
+- **LIVE smoke:** real `gh` + real Opus on `patterninc/agents#2423` (kemenyc, +28/-2),
   `confirm=deny`. Opus produced a genuine review that caught a real regression (kms moving from
   always-on `PI_TOOLSMITH_SERVERS` to a toggle-gated loader breaks existing users). `posted=False`;
   recorded gh calls were exactly `pr list` + `pr diff` — ZERO `pr review` writes.
 
 **Follow-ups:** OMC `/code-review` rubric reuse; Slack PR-discovery fallback + confirm Slack-MCP
 reachable from `edithd`; diff-size gate (>2000 lines ⇒ ASK before a big Opus call); review-style
-learning loop. Standing item: **rotate the Bifrost key.** Kuzu single-process lock unchanged.
+learning loop. Standing item: **rotate the gateway key.** Kuzu single-process lock unchanged.
 
 **Post-build advisor pass caught two real gaps (fixed / corrected):**
 1. **edithd didn't register the skill** — the dispatch registry I added to Brain was empty in
@@ -669,7 +668,7 @@ about a repo auto-adds it to the graph). Two things:
    LOCAL clone; the gh path had never actually worked. Fix: drop `--jq`, return stdout verbatim.
    Regression test locks the arg shape (no `--jq`, raw Accept header present).
 
-**Live proof (temp graph, real gh + real Bifrost):** "what is the adczar repo about?" → daemon
+**Live proof (temp graph, real gh + real gateway):** "what is the adczar repo about?" → daemon
 default resolver fetched adczar live → Sonnet gave an accurate answer (RoR analytics app;
 Snowflake/Sidekiq/Redis) → background Opus extract wrote `repo-adczar` (graph 0→1 repos). Next
 mention = instant HIT. This is the "ask about a repo ⇒ auto-added to the knowledge graph"
