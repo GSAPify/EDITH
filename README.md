@@ -135,7 +135,7 @@ Handy for debugging one layer at a time:
 ```bash
 python -m edith.viewer                        # offline local graph viewer (127.0.0.1:8765)
 python -m edith.ingest [--dry-run]            # graph from local clones (deep extract, costs model calls)
-python -m edith.ingest --workspace patterninc # metadata-graph a whole GitHub org (no clones, no model calls)
+python -m edith.ingest --workspace <org>      # metadata-graph a whole GitHub org (no clones, no model calls)
 python -m edith.ingest --reembed              # embed graph-only Facts (local embedder, free)
 python -m edith.finder "seo tools"            # natural-language repo finder with resolve-on-miss
 python -m edith.voice --engine elevenlabs     # voice loop only, no daemon or session tap

@@ -628,9 +628,8 @@ message is assembled (`test_planted_secret_redacted_before_router`, non-vacuous)
 - Migration verified non-destructive on the LIVE DB: 26 Person / 23 Repo / 145 Fact intact,
   existing names preserved, `gh_handle` column present. (Had to `lsof -ti tcp:8765 | xargs kill`
   the viewer first — Kuzu single-process lock, again.)
-- **LIVE smoke:** real `gh` + real Opus on `patterninc/agents#2423` (kemenyc, +28/-2),
-  `confirm=deny`. Opus produced a genuine review that caught a real regression (kms moving from
-  always-on `PI_TOOLSMITH_SERVERS` to a toggle-gated loader breaks existing users). `posted=False`;
+- **LIVE smoke:** real `gh` + real Opus on a real PR (+28/-2), `confirm=deny`. Opus produced a
+  genuine review that caught a real regression. `posted=False`;
   recorded gh calls were exactly `pr list` + `pr diff` — ZERO `pr review` writes.
 
 **Follow-ups:** OMC `/code-review` rubric reuse; Slack PR-discovery fallback + confirm Slack-MCP
