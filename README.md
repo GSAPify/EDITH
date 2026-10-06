@@ -49,7 +49,7 @@ under [Limitations](#limitations).
 ## Requirements
 
 - macOS on Apple Silicon, Python 3.11 or newer, and [`uv`](https://github.com/astral-sh/uv)
-- A Bifrost gateway key (Pattern's Anthropic-compatible model gateway) for any model call
+- An API key for an Anthropic-compatible model gateway, for any model call
 - For voice: `brew install portaudio`, the `[voice]` extra, and an ElevenLabs key
 
 ## Setup
@@ -60,7 +60,7 @@ uv pip install -e .              # core
 uv pip install -e '.[voice]'     # wake word, STT and TTS (onnxruntime pinned <1.20)
 uv pip install --group dev       # pytest, ruff, pyright
 
-cp .env.example .env             # then fill in BIFROST_*
+cp .env.example .env             # then fill in EDITH_GATEWAY_*
 ```
 
 Gateway config lives in the gitignored `.env`. The API key belongs in the macOS Keychain via
@@ -74,7 +74,7 @@ the background reasoner and every skill on one bus.
 
 ```bash
 source .venv/bin/activate
-set -a; source .env; set +a                    # BIFROST_*, ELEVENLABS_*, EDITH_WAKE_MODEL
+set -a; source .env; set +a                    # EDITH_GATEWAY_*, ELEVENLABS_*, EDITH_WAKE_MODEL
 lsof -ti tcp:8765 | xargs kill 2>/dev/null     # Kuzu is single-process: free the graph first
 python -m edith.daemon --engine elevenlabs
 ```
@@ -163,7 +163,7 @@ The bench is the echo-cancellation spike rather than a shipped subsystem. It nee
                           │        ▼                 │            │                          │
                           │   Narrator ─► speak      ▼            ▼                          │
                           │        │            Skills       ┌────────┐   redacted payload   │
-  TTS ◄───────────────────┼────────┘         (PR-review,     │ Router │──────────────────────┼──► Bifrost
+  TTS ◄───────────────────┼────────┘         (PR-review,     │ Router │──────────────────────┼──► Model
                           │                   session query, └───┬────┘   (haiku/sonnet/opus)│    gateway
                           │                   desktop ctrl)      │                           │
                           │                                      ▼                           │
@@ -208,7 +208,7 @@ as they are actually true, are in [`docs/ENGINEERING-NOTES.md`](docs/ENGINEERING
 edith/
   bus/        in-process async pub/sub (the Event envelope + EventBus)
   memory/     Kuzu graph + sqlite-vec store, embeddings, secrets choke-point, compact()
-  router/     Bifrost adapter, tiering, streaming, latency masking, background reasoning
+  router/     gateway adapter, tiering, streaming, latency masking, background reasoning
   brain/      the orchestrator loop (recall, assemble, redact, decide, remember)
   guard/      pure policy: authorize / Decision + windowed token budget (one per daemon)
   daemon/     edithd composition root, Control API (unix socket), RuntimeState, SecureStore

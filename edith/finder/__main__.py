@@ -2,12 +2,12 @@
 
     python -m edith.finder "which repo handles PR reviews?" [--k N] [--data-dir PATH]
 
-Prints the ranked repos found in the live Memory graph. If Bifrost env is
-present (BIFROST_BASE_URL / BIFROST_API_KEY), it also prints a one-line Sonnet
+Prints the ranked repos found in the live Memory graph. If gateway env is
+present (EDITH_GATEWAY_URL / EDITH_GATEWAY_API_KEY), it also prints a one-line Sonnet
 summary of the top hits (``summarize_hits``); otherwise it prints ranking only.
 
 Reads the store opened at ``--data-dir`` / ``EDITH_DATA_DIR``. The ranking is
-model-free; the summary is the only path that touches Bifrost.
+model-free; the summary is the only path that touches the gateway.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _models() -> dict[Tier, str]:
     return {
-        Tier.HAIKU: os.environ.get("BIFROST_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
-        Tier.SONNET: os.environ.get("BIFROST_MODEL_SONNET", "claude-sonnet-4-6"),
-        Tier.OPUS: os.environ.get("BIFROST_MODEL_OPUS", "claude-opus-4-8"),
+        Tier.HAIKU: os.environ.get("EDITH_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
+        Tier.SONNET: os.environ.get("EDITH_MODEL_SONNET", "claude-sonnet-4-6"),
+        Tier.OPUS: os.environ.get("EDITH_MODEL_OPUS", "claude-opus-4-8"),
     }
 
 
@@ -60,15 +60,15 @@ async def _run(args: argparse.Namespace) -> int:
         summary = f" — {hit.summary}" if hit.summary else ""
         print(f"  {i}. {hit.name}  (score={hit.score:.3f}, degree={hit.degree}){summary}")
 
-    base = os.environ.get("BIFROST_BASE_URL")
-    key = os.environ.get("BIFROST_API_KEY")
+    base = os.environ.get("EDITH_GATEWAY_URL")
+    key = os.environ.get("EDITH_GATEWAY_API_KEY")
     if base and key:
         async with httpx.AsyncClient(base_url=base, timeout=60.0) as client:
             router = Router(client=client, api_key=key, models=_models())
             answer = await summarize_hits(args.query, hits, router)
         print("\nEDITH:", answer)
     else:
-        print("\n(set BIFROST_BASE_URL / BIFROST_API_KEY for a spoken summary)",
+        print("\n(set EDITH_GATEWAY_URL / EDITH_GATEWAY_API_KEY for a spoken summary)",
               file=sys.stderr)
     return 0
 

@@ -79,5 +79,5 @@ testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
 markers = [
-    "live: hits the real Bifrost gateway; skipped unless --run-live is passed",
+    "live: hits the real model gateway; skipped unless --run-live is passed",
 ]

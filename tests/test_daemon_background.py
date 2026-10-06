@@ -81,7 +81,7 @@ def data_dir() -> Iterator[Path]:
 def _daemon(data_dir: Path, *, router=None, voice=None) -> EdithDaemon:  # noqa: ANN001
     return EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=router or FakeRouter(),
         voice=voice,

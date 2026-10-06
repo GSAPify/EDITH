@@ -81,7 +81,7 @@ def data_dir() -> Iterator[Path]:
 def _daemon(data_dir: Path, voice: FakeVoiceIO | None = None) -> EdithDaemon:
     return EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=FakeRouter(),
         voice=voice,
@@ -233,7 +233,7 @@ async def test_session_narration_is_wired_to_raw_speak_not_response(
     voice = FakeVoiceIO()
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=FakeRouter(),
         voice=voice,

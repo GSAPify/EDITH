@@ -200,7 +200,7 @@ async def test_cancel_stops_the_task_and_on_done_never_fires() -> None:
 
 async def test_transport_failure_sets_failed_and_skips_on_done() -> None:
     router = FakeOpusRouter()
-    router.raise_exc = httpx.ConnectError("bifrost unreachable")  # a MODEL_CALL_ERRORS member
+    router.raise_exc = httpx.ConnectError("gateway unreachable")  # a MODEL_CALL_ERRORS member
     reasoner = BackgroundReasoner(router)
     done: list[ModelResponse] = []
 

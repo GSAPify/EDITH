@@ -109,8 +109,8 @@ class VoiceIOLike(Protocol):
 class Secrets:
     """The secrets edithd holds in RAM only (never logged, never persisted)."""
 
-    bifrost_api_key: str = field(repr=False)
-    bifrost_base_url: str
+    gateway_api_key: str = field(repr=False)
+    gateway_url: str
 
 
 def resolve_secrets() -> Secrets:
@@ -121,11 +121,11 @@ def resolve_secrets() -> Secrets:
     Keychain entry (``None``) or a ``KeyringError`` (no backend on a headless
     dev box) falls through to the environment — not a bare except.
     """
-    api_key = _from_keyring("bifrost_api_key") or os.environ.get("BIFROST_API_KEY", "")
-    base_url = _from_keyring("bifrost_base_url") or os.environ.get(
-        "BIFROST_BASE_URL", ""
+    api_key = _from_keyring("gateway_api_key") or os.environ.get("EDITH_GATEWAY_API_KEY", "")
+    base_url = _from_keyring("gateway_url") or os.environ.get(
+        "EDITH_GATEWAY_URL", ""
     )
-    return Secrets(bifrost_api_key=api_key, bifrost_base_url=base_url)
+    return Secrets(gateway_api_key=api_key, gateway_url=base_url)
 
 
 def _from_keyring(user: str) -> str | None:
@@ -518,7 +518,7 @@ class EdithDaemon:
 
         Model-free — ``ingest_workspace`` is the GitHub-API metadata pass (no clones, no
         model calls) and ``backfill_embeddings`` is the local sqlite-vec embedder (no
-        Bifrost). Deep extraction (Opus per repo, ~2600 calls) is explicitly OUT OF SCOPE —
+        gateway). Deep extraction (Opus per repo, ~2600 calls) is explicitly OUT OF SCOPE —
         see the Completion Record. Runs through the injected-store seam so this never opens
         a second Kuzu connection alongside the daemon's own.
         """

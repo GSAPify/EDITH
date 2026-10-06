@@ -95,8 +95,8 @@ async def _amain(
     show_transcript: bool = False,
 ) -> int:
     secrets = resolve_secrets()
-    if not secrets.bifrost_base_url or not secrets.bifrost_api_key:
-        print("[edithd] no Bifrost creds (BIFROST_BASE_URL / BIFROST_API_KEY) — "
+    if not secrets.gateway_url or not secrets.gateway_api_key:
+        print("[edithd] no gateway creds (EDITH_GATEWAY_URL / EDITH_GATEWAY_API_KEY) — "
               "replies will fail gracefully. Source .env to enable them.")
 
     # Shared bus so the live VoiceIO publishes voice.utterance onto the bus Brain reads.
@@ -114,12 +114,12 @@ async def _amain(
 
     expanded = os.path.expanduser(data_dir)
     store = VectorMemoryStore(os.path.join(expanded, "memory.kuzu"))
-    client = httpx.AsyncClient(base_url=secrets.bifrost_base_url, timeout=30.0)
+    client = httpx.AsyncClient(base_url=secrets.gateway_url, timeout=30.0)
     # ONE Guard for this daemon process, built BEFORE the Router so the ordering makes the
     # sharing structural: the same instance gates+meters the Router and is handed to the
     # daemon for the reasoner / narrator / desktop / Control API seams.
     guard = _build_guard()
-    router = _build_router(client, secrets.bifrost_api_key, guard)
+    router = _build_router(client, secrets.gateway_api_key, guard)
 
     daemon = EdithDaemon(
         expanded,

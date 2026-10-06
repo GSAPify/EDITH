@@ -189,7 +189,7 @@ async def test_summary_failure_still_persists_the_opus_detail() -> None:
     bus = EventBus()
     memory = FakeMemory()
     router = FakeRouter()
-    router.raise_exc = httpx.ConnectError("bifrost unreachable")
+    router.raise_exc = httpx.ConnectError("gateway unreachable")
     reasoner = FakeReasoner()
     Brain(bus=bus, memory=memory, router=router, reasoner=reasoner)
     pings = await _collect(bus, "brain.background_done")

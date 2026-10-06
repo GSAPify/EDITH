@@ -262,7 +262,7 @@ class VectorMemoryStore(MemoryStore):
         Backfills a store that was written graph-only (e.g. by a plain
         ``MemoryStore``): reads every ``Fact`` from the Kuzu graph and inserts
         its embedding into sqlite-vec using the LOCAL embedder — NO model /
-        Bifrost calls. Idempotent: Facts already in ``fact_map`` are skipped, so
+        gateway calls. Idempotent: Facts already in ``fact_map`` are skipped, so
         re-running embeds nothing new. Returns the number of Facts embedded.
 
         Sanitize runs FIRST on each text (defence-in-depth: the never-persist

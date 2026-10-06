@@ -3,9 +3,9 @@
     python -m edith.ingest [--repos NAME ...] [--limit N] [--dry-run]
                            [--data-dir PATH] [--scan-root PATH]
 
-Builds a real Router from the environment (BIFROST_BASE_URL / BIFROST_API_KEY /
-BIFROST_MODEL_*) and runs the pipeline once, then prints the status report.
-``--dry-run`` needs no Bifrost credentials (no model calls).
+Builds a real Router from the environment (EDITH_GATEWAY_URL / EDITH_GATEWAY_API_KEY /
+EDITH_MODEL_*) and runs the pipeline once, then prints the status report.
+``--dry-run`` needs no gateway credentials (no model calls).
 """
 
 from __future__ import annotations
@@ -51,14 +51,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _models() -> dict[Tier, str]:
     return {
-        Tier.HAIKU: os.environ.get("BIFROST_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
-        Tier.SONNET: os.environ.get("BIFROST_MODEL_SONNET", "claude-sonnet-4-6"),
-        Tier.OPUS: os.environ.get("BIFROST_MODEL_OPUS", "claude-opus-4-8"),
+        Tier.HAIKU: os.environ.get("EDITH_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
+        Tier.SONNET: os.environ.get("EDITH_MODEL_SONNET", "claude-sonnet-4-6"),
+        Tier.OPUS: os.environ.get("EDITH_MODEL_OPUS", "claude-opus-4-8"),
     }
 
 
 def _reembed(data_dir: str) -> int:
-    """Backfill embeddings for the live graph, purely local (no Bifrost)."""
+    """Backfill embeddings for the live graph, purely local (no gateway)."""
     expanded = os.path.expanduser(data_dir)
     store = VectorMemoryStore(os.path.join(expanded, "memory.kuzu"))
     try:
@@ -74,7 +74,7 @@ async def _run(args: argparse.Namespace) -> int:
         return _reembed(args.data_dir)
 
     if args.workspace:
-        # Model-free metadata graph of a whole org via the GitHub API (no Bifrost).
+        # Model-free metadata graph of a whole org via the GitHub API (no gateway).
         from edith.ingest.workspace import ingest_workspace
 
         report = ingest_workspace(
@@ -100,10 +100,10 @@ async def _run(args: argparse.Namespace) -> int:
         print(report.render())
         return 0
 
-    base = os.environ.get("BIFROST_BASE_URL")
-    key = os.environ.get("BIFROST_API_KEY")
+    base = os.environ.get("EDITH_GATEWAY_URL")
+    key = os.environ.get("EDITH_GATEWAY_API_KEY")
     if not base or not key:
-        print("BIFROST_BASE_URL / BIFROST_API_KEY not set (needed unless --dry-run)",
+        print("EDITH_GATEWAY_URL / EDITH_GATEWAY_API_KEY not set (needed unless --dry-run)",
               file=sys.stderr)
         return 2
 

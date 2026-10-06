@@ -2,7 +2,7 @@
 
 Every fetched text passes through here BEFORE any model call and BEFORE any
 graph write (north-star §6.1). The owner's global ``~/.claude/CLAUDE.md`` holds
-LIVE OAuth tokens; a planted or real secret must never reach Bifrost or the Kuzu
+LIVE OAuth tokens; a planted or real secret must never reach the gateway or the Kuzu
 DB. This is a thin, deliberately un-bypassable wrapper over ``sanitize_text`` so
 the whole pipeline has one obvious place to point at for "where do secrets die".
 

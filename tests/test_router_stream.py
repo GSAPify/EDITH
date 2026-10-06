@@ -1,6 +1,6 @@
 """Streaming + two-call latency masking + redaction choke-point (spec 05).
 
-MockTransport only — no live Bifrost. The masking test proves TRUE overlap (both requests
+MockTransport only — no live gateway. The masking test proves TRUE overlap (both requests
 issued before either stream is drained), which is the property that delivers the latency win;
 mere completion-ordering would pass even for a sequential impl.
 """
@@ -15,7 +15,7 @@ import pytest
 
 from edith.router import ModelChunk, Router, Tier
 
-_BASE = "https://bifrost.test.internal/anthropic"
+_BASE = "https://gateway.test.internal/anthropic"
 _KEY = "sk-bf-TESTKEY-not-real"
 _MODELS = {
     Tier.HAIKU: "claude-haiku-4-5",
@@ -160,16 +160,16 @@ async def test_model_chunk_is_importable_and_shaped() -> None:
 
 
 @pytest.mark.live
-async def test_live_stream_real_bifrost_yields_tokens() -> None:
-    """Real streaming round-trip — proves the SSE parser against the ACTUAL Bifrost event
+async def test_live_stream_real_gateway_yields_tokens() -> None:
+    """Real streaming round-trip — proves the SSE parser against the ACTUAL gateway event
     stream (MockTransport only proves it against our idea of it). Skipped unless --run-live.
     """
     import os
 
-    base = os.environ.get("BIFROST_BASE_URL")
-    key = os.environ.get("BIFROST_API_KEY")
+    base = os.environ.get("EDITH_GATEWAY_URL")
+    key = os.environ.get("EDITH_GATEWAY_API_KEY")
     if not base or not key:
-        pytest.skip("BIFROST_BASE_URL / BIFROST_API_KEY not set")
+        pytest.skip("EDITH_GATEWAY_URL / EDITH_GATEWAY_API_KEY not set")
 
     live_models = {Tier.HAIKU: "claude-haiku-4-5-20251001", Tier.SONNET: "claude-sonnet-4-6",
                    Tier.OPUS: "claude-opus-4-8"}
