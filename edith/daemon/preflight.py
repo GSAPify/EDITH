@@ -150,12 +150,12 @@ def check_speech(env: dict[str, str] | None = None) -> Check:
 def check_gateway(env: dict[str, str] | None = None) -> Check:
     """Model-gateway config. Never prints the key — only whether one is present."""
     environ = env if env is not None else dict(os.environ)
-    if environ.get("BIFROST_BASE_URL") and environ.get("BIFROST_API_KEY"):
-        return Check("Model gateway", True, environ["BIFROST_BASE_URL"])
+    if environ.get("EDITH_GATEWAY_URL") and environ.get("EDITH_GATEWAY_API_KEY"):
+        return Check("Model gateway", True, environ["EDITH_GATEWAY_URL"])
     return Check(
         "Model gateway",
         False,
-        "BIFROST_BASE_URL / BIFROST_API_KEY not both set",
+        "EDITH_GATEWAY_URL / EDITH_GATEWAY_API_KEY not both set",
         "source .env before starting the daemon.",
     )
 

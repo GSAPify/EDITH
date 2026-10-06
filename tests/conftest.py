@@ -1,4 +1,4 @@
-"""Test config: gate the live Bifrost smoke test behind --run-live.
+"""Test config: gate the live gateway smoke test behind --run-live.
 
 Live tests hit the real gateway (cost + network). They are skipped by default
 and run only with ``--run-live``. The ``.env`` is loaded ONLY on that path — if
@@ -19,7 +19,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--run-live",
         action="store_true",
         default=False,
-        help="run tests marked `live` against the real Bifrost gateway",
+        help="run tests marked `live` against the real model gateway",
     )
 
 
@@ -29,7 +29,7 @@ def pytest_collection_modifyitems(
     if config.getoption("--run-live"):
         _load_dotenv()
         return
-    skip_live = pytest.mark.skip(reason="needs --run-live (hits the real Bifrost gateway)")
+    skip_live = pytest.mark.skip(reason="needs --run-live (hits the real model gateway)")
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip_live)

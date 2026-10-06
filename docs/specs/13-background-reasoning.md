@@ -112,7 +112,7 @@ class BackgroundReasoner:
 
 Brain gains an injected `reasoner: BackgroundReasonerLike | None = None` (default None → never
 backgrounds, standalone behavior preserved) and the two triggers + `on_done`. **No change to
-`bifrost.py` / `ModelResponse` / `model_call`** — the passive trigger reads the utterance directly,
+`gateway.py` / `ModelResponse` / `model_call`** — the passive trigger reads the utterance directly,
 so the flag-plumbing that an earlier draft added was removed.
 
 ## Changes
@@ -161,7 +161,7 @@ TDD. `edith/` source stays pyright-clean; the full suite + ruff pass.
   plain pause. Low severity (the think was authorized when started; delivering its result after a
   transient pause is arguably correct) — noted, not gated.
 - **Live consumer is owner-smoke.** End-to-end "ack now, opus pings later by voice" needs a mic + a
-  real Bifrost opus call.
+  real opus call.
 - **Guard still deferred** — `budget_check` defaults to allow.
 
 ## Completion Record — 13 background-reasoning — 2026-07-23
@@ -169,7 +169,7 @@ TDD. `edith/` source stays pyright-clean; the full suite + ruff pass.
 - **Built:** `BackgroundReasoner` + `BackgroundJob` + `JobStatus` (`edith/router/background.py`,
   exported); Brain explicit + passive(deep-input) triggers, `on_done` (remember→summarize→ping),
   `_is_deep_input`; daemon composition (`BackgroundReasoner(router)` injected, `brain.background_done`
-  → `_speak_background` voiced-only, `cancel_all()` in `stop()`). **No `bifrost.py` change.**
+  → `_speak_background` voiced-only, `cancel_all()` in `stop()`). **No `gateway.py` change.**
 - **Tests (pre-merge, on the `833d22f` base):** 322 passed, 2 skipped (live). **19** new tests across
   the three new files (7 router + 8 brain + 4 daemon).
 - **Tests (post-merge with `master` `3131d33`, 2026-07-25): 348 passed, 2 skipped.** Arithmetic:

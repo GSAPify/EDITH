@@ -2,7 +2,7 @@
 
 An ``Embedder`` Protocol decouples Memory from any specific model, and a
 ``LocalEmbedder`` default runs fully offline (fastembed / all-MiniLM-L6-v2,
-384-dim) so recall never touches Bifrost or the network at query time
+384-dim) so recall never touches the gateway or the network at query time
 (the model is fetched once on first use). Matches the spec's embedding choice.
 """
 

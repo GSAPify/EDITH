@@ -21,7 +21,7 @@
 | **edithd** | The daemon process that runs everything under the hood. |
 | **bus** | In-process event/message bus; components `publish`/`subscribe`. |
 | **Guard** | Cross-cutting enforcement: `redact`, `authorize` (allow/ask/deny), budget. |
-| **Router** | `model_call(messages, tier_hint) -> response` over the Bifrost adapter. |
+| **Router** | `model_call(messages, tier_hint) -> response` over the gateway adapter. |
 | **Memory** | Graph + vector store: `recall` / `remember` / `compact`. |
 | **SessionBus** | Watches OMC / Claude Code terminals → `session.event` / `session.state`. |
 | **Skill** | Capability with `name`, `triggers`, `needs_confirmation`, `run(context)->result`. |
@@ -222,7 +222,7 @@ Rules that apply here:
 
 - `Guard.redact(payload)` runs on **every** raw collector line before it touches the bus,
   a model call, a log, or Memory. No raw terminal content is ever published unredacted.
-- Redacted summaries only — never raw lines — may be stored in Memory or sent to Bifrost.
+- Redacted summaries only — never raw lines — may be stored in Memory or sent to the gateway.
 - If the collector tails `.omc/logs/` or session transcripts, those files may contain
   credentials from prior sessions. The ingestion pipeline must apply redaction on read,
   not after processing.

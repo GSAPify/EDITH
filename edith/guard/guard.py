@@ -10,7 +10,7 @@ already owned by ``edith.memory.secrets.sanitize_text`` and lives in the Router'
 outbound choke-point; Guard does not duplicate it.
 
 ``Tier`` is imported from ``edith.router.tiers`` (the tier-selection module) — the
-same internal import ``bifrost.py`` uses, no cycle since ``tiers`` imports nothing
+same internal import ``gateway.py`` uses, no cycle since ``tiers`` imports nothing
 back.
 """
 
@@ -31,7 +31,7 @@ _DEFAULT_DENYLIST: frozenset[str] = frozenset(
 )
 
 # A daily token budget. 1,000,000 tokens/day is a generous-but-real ceiling for an
-# always-on daemon on Pattern's Bifrost limits — enough headroom that normal use
+# always-on daemon on the gateway's limits — enough headroom that normal use
 # never trips it, low enough that a runaway narration loop is caught within a day.
 # The exact number is a config knob, not load-bearing; the governance is.
 _DEFAULT_TOKEN_BUDGET = 1_000_000

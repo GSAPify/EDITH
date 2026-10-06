@@ -112,7 +112,7 @@ voice-reachable through one process that owns the Kuzu handle.
 - **Key decisions:** (1) injectable `system_preamble`/`answer_max_tokens` on Brain, defaults
   preserve all existing behavior; (2) shared `edith/voice/persona.py` so harness + daemon don't
   drift; (3) **model-error seam** — Brain catches `MODEL_CALL_ERRORS` (exported by the router) and
-  publishes a graceful fallback `brain.decision`, so a Bifrost blip speaks an apology instead of
+  publishes a graceful fallback `brain.decision`, so a gateway blip speaks an apology instead of
   going silent (the daemon has no other handler on this path); (4) injected `bus` so the VoiceIO
   publishes onto the bus Brain reads.
 - **Deviations:** tightened BOTH `MemoryLike` protocols' `remember(edges=...)` from `list[object]`

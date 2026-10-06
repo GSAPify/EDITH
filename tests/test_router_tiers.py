@@ -85,7 +85,7 @@ def test_resolve_models_defaults_to_the_current_generation() -> None:
 
     from edith.router import Tier, resolve_models
 
-    for var in ("BIFROST_MODEL_HAIKU", "BIFROST_MODEL_SONNET", "BIFROST_MODEL_OPUS"):
+    for var in ("EDITH_MODEL_HAIKU", "EDITH_MODEL_SONNET", "EDITH_MODEL_OPUS"):
         os.environ.pop(var, None)
 
     models = resolve_models()
@@ -99,5 +99,5 @@ def test_resolve_models_honors_env_overrides(monkeypatch) -> None:
     """A tier can still be pinned without a code change."""
     from edith.router import Tier, resolve_models
 
-    monkeypatch.setenv("BIFROST_MODEL_OPUS", "claude-opus-4-8")
+    monkeypatch.setenv("EDITH_MODEL_OPUS", "claude-opus-4-8")
     assert resolve_models()[Tier.OPUS] == "claude-opus-4-8"

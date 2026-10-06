@@ -17,7 +17,7 @@
 | **edithd** | The daemon process that runs everything under the hood. |
 | **bus** | In-process event/message bus; components `publish`/`subscribe`. |
 | **Guard** | Cross-cutting enforcement: `redact`, `authorize` (allow/ask/deny), budget. |
-| **Router** | `model_call(messages, tier_hint) -> response` over the Bifrost adapter. |
+| **Router** | `model_call(messages, tier_hint) -> response` over the gateway adapter. |
 | **Memory** | Graph + vector store: `recall` / `remember` / `compact`. |
 | **SessionBus** | Watches OMC / Claude Code terminals → `session.event` / `session.state`. |
 | **Skill** | Capability with `name`, `triggers`, `needs_confirmation`, `run(context)->result`. |
@@ -175,7 +175,7 @@ Target: **time-to-first-audio under 2 seconds** from end of owner's utterance.
   VAD / end-of-speech  ~300 ms (silence detection after last word)
   STT (faster-whisper) ~300–600 ms (small.en on CPU, typical command length)
   bus → Brain → Router ~100 ms (local, in-process)
-  haiku fast-ack call  ~300–600 ms (Bifrost round-trip, short prompt)
+  haiku fast-ack call  ~300–600 ms (gateway round-trip, short prompt)
   TTS first chunk      ~400–700 ms (ElevenLabs streaming latency)
   ─────────────────────────────────
   total (optimistic)   ~1.4 s
@@ -427,7 +427,7 @@ path. Measure with `time.perf_counter()` around the STT → bus → speak() → 
     sounddevice). `uv.lock` regenerated.
   - **`sanitize_text` broadened (DONE, 8 tests)** for the ElevenLabs egress — added standalone
     AWS (`AKIA`/`ASIA`), Google API key (`AIza`), Slack (`xox…`), and `sk_`-underscore shapes.
-    Rationale: unlike Slice 2 (a miss reached Opus via the Bifrost *proxy*), a miss here sends text
+    Rationale: unlike Slice 2 (a miss reached Opus via the gateway *proxy*), a miss here sends text
     to **ElevenLabs, a third-party cloud** — a real exfiltration surface + org "never leak secrets".
   - **Fixed the ElevenLabs adapter:** worker-2 used the v1 `elevenlabs.generate` API, absent in
     v2.56 → rewrote to `AsyncElevenLabs.text_to_speech.stream(..., output_format="pcm_24000")` with

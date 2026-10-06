@@ -25,7 +25,7 @@ handler, which was verified in-process to be:
 - **no formatter** — the bare message only: no timestamp, no level, no logger name
 - **destination stderr** — which the plist now captures permanently
 
-A `WARNING` carrying `BIFROST_API_KEY=sk-…` was confirmed to reach stderr **completely
+A `WARNING` carrying `EDITH_GATEWAY_API_KEY=sk-…` was confirmed to reach stderr **completely
 unredacted**.
 
 ### Call-site audit — the whole surface is five lines
@@ -66,7 +66,7 @@ Measured against `sanitize_text`:
 
 | input | result |
 |---|---|
-| `BIFROST_API_KEY=sk-abc…` | `BIFROST_API_KEY: [REDACTED]` |
+| `EDITH_GATEWAY_API_KEY=sk-abc…` | `EDITH_GATEWAY_API_KEY: [REDACTED]` |
 | `postgres://user:hunter2@db/prod` | `postgres://user:[REDACTED]@db/prod` |
 | `suppressed self-echo 'my bank pin is four nine two one'` | **passes through** |
 | `suppressed self-echo 'tell Sarah the acquisition closes Friday'` | **passes through** |

@@ -10,7 +10,7 @@ Two-tier, budget-aware (north-star §6.2, latency-first):
 The Router is CONSTRUCTOR-INJECTED so unit tests use a deterministic fake — no
 live calls. As defence-in-depth the message content is re-sanitized at the
 model-call egress (``sanitize_text`` is idempotent); redaction upstream is the
-primary choke-point, this guarantees no raw text reaches Bifrost even if a
+primary choke-point, this guarantees no raw text reaches the gateway even if a
 future caller forgets to redact first.
 """
 

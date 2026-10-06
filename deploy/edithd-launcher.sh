@@ -2,7 +2,7 @@
 # edithd launchd wrapper (spec: EDITH operationalization item 1).
 #
 # launchd does NOT source .env or any shell rc/profile file, but edithd needs
-# BIFROST_BASE_URL, BIFROST_API_KEY, ELEVENLABS_*, and EDITH_WAKE_MODEL in its
+# EDITH_GATEWAY_URL, EDITH_GATEWAY_API_KEY, ELEVENLABS_*, and EDITH_WAKE_MODEL in its
 # environment. This wrapper sources the repo's untracked .env (never committed
 # — see .env.example) and then execs the daemon so those vars are inherited.
 #
@@ -21,7 +21,7 @@ if [ -f "${ENV_FILE}" ]; then
     # Refuse to source a .env that anyone else can read or write.
     #
     # `source` EXECUTES the file, so a group/world-writable .env is arbitrary code as the
-    # owner at every login. And a world-READABLE one leaks BIFROST_API_KEY to any other local
+    # owner at every login. And a world-READABLE one leaks EDITH_GATEWAY_API_KEY to any other local
     # account: verified on the build machine, where .env was 0644 and a second account (uid
     # 501) could traverse to it. Checking here rather than only documenting it means the
     # permission cannot silently drift back — a chmod regression fails loudly at boot instead

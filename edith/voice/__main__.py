@@ -1,7 +1,7 @@
 """``python -m edith.voice`` — live always-listening smoke (spec 03 §Verification).
 
 Boots the real audio loop: say "<wake word>, <something>" and EDITH transcribes it and —
-when Bifrost creds are present — answers by voice via the Router (Sonnet, EDITH's live
+when gateway creds are present — answers by voice via the Router (Sonnet, EDITH's live
 voice). This is the owner LIVE-SMOKE entry: it needs a mic, a speaker, the ``[voice]`` extra,
 and (for ``--engine elevenlabs``) an ElevenLabs key. Not part of the headless test suite.
 
@@ -10,7 +10,7 @@ and (for ``--engine elevenlabs``) an ElevenLabs key. Not part of the headless te
 
 Env knobs: ``EDITH_WAKE_MODEL`` (bundled name like ``hey_jarvis`` or a path to a custom
 ``.onnx``), ``EDITH_WAKE_THRESHOLD`` (default 0.5), ``EDITH_VOICE_DEBUG=1`` (mic-rms +
-peak-wake-score heartbeat). Replies need ``BIFROST_BASE_URL`` + ``BIFROST_API_KEY``; without
+peak-wake-score heartbeat). Replies need ``EDITH_GATEWAY_URL`` + ``EDITH_GATEWAY_API_KEY``; without
 them the loop still wakes + transcribes + prints, just doesn't answer.
 """
 
@@ -72,9 +72,9 @@ def _start_mute_toggle(voice: VoiceIO) -> None:
 
 
 def _build_router() -> Router | None:
-    """Build a Router from env, or None when Bifrost creds are absent (print-only mode)."""
-    base = os.environ.get("BIFROST_BASE_URL")
-    key = os.environ.get("BIFROST_API_KEY")
+    """Build a Router from env, or None when gateway creds are absent (print-only mode)."""
+    base = os.environ.get("EDITH_GATEWAY_URL")
+    key = os.environ.get("EDITH_GATEWAY_API_KEY")
     if not base or not key:
         return None
     client = httpx.AsyncClient(base_url=base, timeout=30.0)
@@ -105,7 +105,7 @@ async def _amain(engine: str) -> int:
         if not text:
             return
         if router is None:
-            print("[voice] (no BIFROST creds → not answering; source .env to enable replies)")
+            print("[voice] (no gateway creds → not answering; source .env to enable replies)")
             return
         # Router redacts + tier-selects internally (Slice 5); Sonnet is the live voice.
         try:
@@ -140,7 +140,7 @@ async def _amain(engine: str) -> int:
     followup = float(os.environ.get("EDITH_FOLLOWUP_SECONDS", "10.0"))
     await voice.speak(f"Voice loop online. Say {phrase} to talk to me.")
     print(f"[voice] wake model: {model}  (threshold {threshold})")
-    print(f"[voice] replies: {'ON (Bifrost)' if router else 'OFF (no creds)'}")
+    print(f"[voice] replies: {'ON (gateway)' if router else 'OFF (no creds)'}")
     print(f"[voice] conversation mode: follow-ups accepted for {followup:.0f}s after a reply "
           "(no wake word); pauses no longer cut you off")
     print(f"[voice] listening — say '{phrase}, ...'   (m+enter = mute, Ctrl-C to stop)")

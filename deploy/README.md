@@ -87,7 +87,7 @@ here.
 
    Why this is a hard requirement and not hygiene advice: `edithd-launcher.sh` **sources**
    `.env`, which *executes* it. A group- or world-**writable** `.env` is therefore arbitrary
-   code running as you at every login. A world-**readable** one hands `BIFROST_API_KEY` to
+   code running as you at every login. A world-**readable** one hands `EDITH_GATEWAY_API_KEY` to
    any other local account — on the machine this was built on, `.env` was `0644`, `~` was
    group-`staff` traversable, and a second account (uid 501) could read it outright.
 

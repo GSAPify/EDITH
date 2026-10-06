@@ -17,7 +17,7 @@
 | **edithd** | The daemon process that runs everything under the hood. |
 | **bus** | In-process event/message bus; components `publish`/`subscribe`. |
 | **Guard** | Cross-cutting enforcement: `redact`, `authorize` (allow/ask/deny), budget. |
-| **Router** | `model_call(messages, tier_hint) -> response` over the Bifrost adapter. |
+| **Router** | `model_call(messages, tier_hint) -> response` over the gateway adapter. |
 | **Memory** | Graph + vector store: `recall` / `remember` / `compact`. |
 | **Brain** | The orchestrator decision loop. Consumes bus events, plans, sequences calls. |
 | **working context** | The in-RAM assembled context for the current conversation/session — the thing that fills up and gets compacted at ~50%. Distinct from durable Memory on disk. |
@@ -382,7 +382,7 @@ it **subscribes** to `voice.utterance`, `session.event`, `session.state`, `skill
 
 ### Startup (ordered)
 1. launchd starts `edithd` (native, uv-managed Python 3.11+).
-2. Fetch secrets from Keychain (`keyring`): Memory-volume unlock key, Bifrost key. Held in RAM only.
+2. Fetch secrets from Keychain (`keyring`): Memory-volume unlock key, gateway key. Held in RAM only.
 3. **Mount the encrypted Memory volume** using the Keychain key; open the Kuzu DB.
 4. Bring up the internal bus.
 5. Start subsystems in dependency order: Memory → Guard → Router(passthrough) → Brain → (later)
@@ -431,7 +431,7 @@ The four commands are locked (north-star §4.2); this slice implements their dae
 - **Libraries (matching north-star §5):**
   - `kuzu` (embedded graph + native VECTOR extension) — Memory store.
   - `sentence-transformers` (`all-MiniLM-L6-v2`) — local embeddings, no cloud/cost.
-  - `keyring` — Keychain access for the volume key + Bifrost key.
+  - `keyring` — Keychain access for the volume key + gateway key.
   - stdlib `asyncio` — the in-process bus + Control API socket server.
   - `sqlite-vec` — **only if** the documented fallback is triggered (not a default dependency).
 
@@ -465,8 +465,8 @@ Defer to north-star §5 for the stack. Slice-specific additions/decisions:
       *fact of it*, never the secret itself.
   - **Redact before every model call:** `Guard.redact(payload)` runs on the whole assembled working
     context before it is handed to `Router.model_call` (north-star §6.1). A credential never leaves
-    the machine in a Bifrost request even if one slipped into a raw turn.
-  - **Keychain, not files:** EDITH's own secrets (Bifrost key, Memory-volume key) via `keyring`,
+    the machine in a gateway request even if one slipped into a raw turn.
+  - **Keychain, not files:** EDITH's own secrets (gateway key, Memory-volume key) via `keyring`,
     loaded to RAM at use, never logged.
   - **Encryption at rest:** the Memory store lives on the encrypted volume (mechanism above).
 
@@ -476,7 +476,7 @@ Defer to north-star §5 for the stack. Slice-specific additions/decisions:
   narration is summarized locally (string/pattern work, no model). A model call happens only when an
   intent clears the gate.
 - **Embeddings are free/local** (sentence-transformers on-device) — recall's semantic step never
-  hits Bifrost.
+  hits the gateway.
 - **Compaction uses the cheapest tier (haiku)** — summarization is a haiku job, not opus.
 - **Answering** defaults to the cheapest tier that can do the job (Router discipline, north-star
   §6.2); Brain only hints opus for genuinely hard reasoning.
@@ -613,7 +613,7 @@ semantic recall (reopen the on-disk DB, recall the stored fact).
   this run). No custom crypto written.
 
 **Files created / changed:**
-- `pyproject.toml`, `uv.lock`, `.env.example` (Bifrost placeholders — no real secrets)
+- `pyproject.toml`, `uv.lock`, `.env.example` (gateway placeholders — no real secrets)
 - `edith/__init__.py`, `edith/memory/__init__.py`
 - `edith/memory/store.py`, `edith/memory/secrets.py`, `edith/memory/embeddings.py`,
   `edith/memory/vector.py`
@@ -690,7 +690,7 @@ allows extension loading here — no blocker).
 
 ## Completion Record — Bus + Router + Brain loop — 2026-07-06 — **DONE (edithd = next)**
 
-> Status: **DONE** for the event bus, the Router/Bifrost adapter, and the Brain loop
+> Status: **DONE** for the event bus, the Router/gateway adapter, and the Brain loop
 > passthrough — all strict-TDD (red → right-reason fail → minimal green). **edithd daemon
 > lifecycle + Control API (unix-socket pause/resume/kill/status) is the next step**, and is the
 > only remaining major Slice-1 component besides `compact()`.
@@ -701,13 +701,13 @@ allows extension loading here — no blocker).
   source, payload)`; `publish` awaits every matching handler via `asyncio.gather` (deterministic
   multi-subscriber delivery), topic-filters, and no-ops on a topic with no subscribers.
 - **`edith/router/`** — `async model_call(messages, tier_hint) -> ModelResponse` over the
-  Anthropic-compatible Bifrost gateway (`POST {base}/v1/messages`, `x-api-key` /
+  Anthropic-compatible model gateway (`POST {base}/v1/messages`, `x-api-key` /
   `anthropic-version: 2023-06-01` headers, `{model, max_tokens, messages}` body, parses
   `.content[0].text` + `.usage.{input,output}_tokens`). `httpx.AsyncClient` is **constructor-
   injected** (the `MockTransport` seam). Transient failures retried with **tenacity**
   (`retry_if_exception` on `httpx.TransportError` or `HTTPStatusError` status ≥ 500, 3 attempts,
   exponential backoff, `reraise=True`); **4xx raises immediately, no retry**. `Tier` enum
-  (HAIKU/SONNET/OPUS) → model-id map. Added `BIFROST_MODEL_{HAIKU,SONNET,OPUS}` to `.env.example`
+  (HAIKU/SONNET/OPUS) → model-id map. Added `EDITH_MODEL_{HAIKU,SONNET,OPUS}` to `.env.example`
   (+ the real gitignored `.env`).
 - **`edith/brain/`** — the core loop on a `voice.utterance` event: `Memory.recall(utterance)` →
   assemble (system preamble + recalled facts + utterance) → **redact** every message via
@@ -738,7 +738,7 @@ allows extension loading here — no blocker).
   building it would be scope creep. Brain reuses `secrets.sanitize_text`. Deviation recorded here;
   moves into Router/Guard when Guard lands.
 - **API key from `os.environ` / `.env`, not Keychain.** Spec 05 says the key is Keychain-only;
-  the task's verified contract reads `BIFROST_API_KEY` from `.env`. Followed the task. Keychain
+  the task's verified contract reads `EDITH_GATEWAY_API_KEY` from `.env`. Followed the task. Keychain
   retrieval is daemon-bring-up work (deferred). The key is never printed/logged; `sk-bf-*`
   redacted in any output.
 - **Model ids = the task's verified defaults** (`claude-haiku-4-5-20251001`,
@@ -754,13 +754,13 @@ allows extension loading here — no blocker).
 (`.env`, not Keychain — see above). No two-call masking / streaming / tier-override heuristics /
 Guard budget gate — all explicitly Slice-5 or later; this is the north-star §7 passthrough.
 
-**Files created:** `edith/bus/{__init__,event_bus}.py`, `edith/router/{__init__,bifrost}.py`,
+**Files created:** `edith/bus/{__init__,event_bus}.py`, `edith/router/{__init__,gateway}.py`,
 `edith/brain/{__init__,loop}.py`, `tests/conftest.py`, `tests/test_bus.py`,
 `tests/test_router.py`, `tests/test_brain_loop.py`. **Changed:** `pyproject.toml` (+httpx,
 +tenacity, +pytest-asyncio, `asyncio_mode=auto`, `live` marker), `uv.lock`, `.env.example`.
 
 **Verification (fresh):** `uv run pytest` → **29 passed, 1 skipped** (the live smoke) ·
-live smoke via `--run-live` → **1 passed** (real Bifrost 200, non-empty text, max_tokens=8) ·
+live smoke via `--run-live` → **1 passed** (real gateway 200, non-empty text, max_tokens=8) ·
 `uv run ruff check edith tests` → **All checks passed** · `uv run pyright edith` → **0 errors,
 0 warnings**.
 

@@ -152,7 +152,7 @@ async def test_status_report_never_prints_secrets(tmp_path: Path) -> None:
     (repo / ".git" / "config").write_text(
         '[remote "origin"]\n\turl = https://github.com/patterninc/portal.git\n'
     )
-    (repo / "README.md").write_text("# portal\nBIFROST_API_KEY=sk-proj-LEAKYsecret123456")
+    (repo / "README.md").write_text("# portal\nEDITH_GATEWAY_API_KEY=sk-proj-LEAKYsecret123456")
     data_dir = tmp_path / "data"
 
     report = await run_ingest(
@@ -241,7 +241,7 @@ async def test_ingest_redacts_secret_before_embedding(
         '[remote "origin"]\n\turl = https://github.com/patterninc/portal.git\n'
     )
     (repo / "README.md").write_text(
-        "# portal\nBIFROST_API_KEY=sk-proj-LEAKYsecret123456"
+        "# portal\nEDITH_GATEWAY_API_KEY=sk-proj-LEAKYsecret123456"
     )
     data_dir = tmp_path / "data"
 

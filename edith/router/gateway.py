@@ -1,9 +1,9 @@
-"""Bifrost adapter + Router (spec 05).
+"""Gateway adapter + Router (spec 05).
 
-Bifrost is Pattern's Anthropic-compatible gateway. This turns Router's tier→model choice into
+The gateway is any Anthropic-compatible endpoint. This turns Router's tier→model choice into
 an HTTP call:
 
-    POST {BIFROST_BASE_URL}/v1/messages
+    POST {EDITH_GATEWAY_URL}/v1/messages
     headers: x-api-key, anthropic-version: 2023-06-01, content-type: application/json
     body:    {"model", "max_tokens", "messages", "stream"?}
     resp:    .content[0].text, .usage.{input_tokens, output_tokens}   (or an SSE stream)
@@ -108,7 +108,7 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 class Router:
-    """Model-call gateway: tier selection + streaming + latency masking over Bifrost."""
+    """Model-call gateway: tier selection + streaming + latency masking over the gateway."""
 
     def __init__(
         self,

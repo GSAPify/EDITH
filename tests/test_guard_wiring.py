@@ -38,7 +38,7 @@ from edith.session.narrator import Narrator
 from edith.skills import DesktopControlSkill
 from edith.skills.base import SkillContext
 
-_BASE = "https://bifrost.test.internal/anthropic"
+_BASE = "https://gateway.test.internal/anthropic"
 _KEY = "sk-bf-TESTKEY-not-real"
 _MODELS = {
     Tier.HAIKU: "claude-haiku-4-5",
@@ -321,7 +321,7 @@ async def test_daemon_shares_one_guard_across_its_seams(data_dir: Path) -> None:
     guard.record(900, 0)  # past the opus reserve, under the full cap
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=_FakeMemory(),
         router=_FakeRouter(),
         guard=guard,
@@ -354,7 +354,7 @@ async def test_daemon_budget_used_tracks_spend_after_start(data_dir: Path) -> No
     guard = Guard()
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=_FakeMemory(),
         router=_FakeRouter(),
         guard=guard,

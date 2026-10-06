@@ -29,7 +29,7 @@ everything else runs under the hood in the `edithd` daemon.
 - Not a chat window / not a GUI app. Menu-bar + voice only.
 - Not multi-user, not cloud-hosted. One machine, one owner, local-first.
 - Not a general web agent. Scope = the owner's dev workflow (repos, PRs, Slack, desktop).
-- Not a model trainer. EDITH orchestrates existing models via Bifrost; it fine-tunes nothing.
+- Not a model trainer. EDITH orchestrates existing models via the gateway; it fine-tunes nothing.
 
 ### Honest framing (no unicorns) 🚫🦄
 
@@ -79,7 +79,7 @@ capability that does not exist today.
 │                               └───┬────┘  └───┬───┘  └►│  SKILLS    │  │
 │                                   │           │        │ pr-review, │  │
 │                                   ▼           ▼        │ airflow,   │  │
-│                             Bifrost adapter  redact/   │ slack,     │  │
+│                             gateway adapter  redact/   │ slack,     │  │
 │                             (haiku/sonnet/   authorize/│ desktop    │  │
 │                              opus)           budget    └────────────┘  │
 │                                                                        │
@@ -103,7 +103,7 @@ capability that does not exist today.
 | **`edithd` daemon core** | Process lifecycle, the internal bus, wiring of all subsystems, launchd supervision, Control API server. The "spine." |
 | **VOICE (VoiceIO)** | Local wake-word + STT in; TTS out. Emits `wake`/`utterance` events; provides `speak(text)`. |
 | **BRAIN / ORCHESTRATOR** | The decision loop. Consumes bus events, plans, decides which skill/model to invoke, sequences the two-call latency-masking pattern, asks the owner when unsure. |
-| **ROUTER** | Picks the model tier (haiku/sonnet/opus) and calls Bifrost through a provider-agnostic adapter. Owns the two-call pattern mechanics. |
+| **ROUTER** | Picks the model tier (haiku/sonnet/opus) and calls the model gateway through a provider-agnostic adapter. Owns the two-call pattern mechanics. |
 | **MEMORY** | Durable graph (project→repo→PR→person) + vector recall. `recall`/`remember`/`compact`. Encrypted at rest. |
 | **SESSION BUS** | Watches running OMC / Claude Code terminals, turns their events into session state on the internal bus. (Distinct from the internal bus — this is a *producer* of session events.) |
 | **SKILLS** | Discrete capabilities (PR review, Airflow, Slack, desktop control). Uniform `run(context)` contract; declare triggers + confirmation needs. |
@@ -155,7 +155,7 @@ a future control client can't speak unix sockets. Loopback/socket only — never
 
 | Component | Contract |
 |-----------|----------|
-| **Router** | `model_call(messages, tier_hint) -> response` — selects haiku/sonnet/opus over the Bifrost adapter; supports the two-call latency-masking pattern (fast ack + slow answer). |
+| **Router** | `model_call(messages, tier_hint) -> response` — selects haiku/sonnet/opus over the gateway adapter; supports the two-call latency-masking pattern (fast ack + slow answer). |
 | **Guard** | `redact(payload) -> safe`; `authorize(action) -> allow \| ask \| deny`; plus a budget check gating whether an event earns a model call. |
 | **Memory** | `recall(query) -> context`; `remember(facts \| edges)`; `compact() -> ()` (shrinks working context ~50%). |
 | **VoiceIO** | emits `voice.wake` / `voice.utterance` events; provides `speak(text) -> ()`. |
@@ -179,7 +179,7 @@ a future control client can't speak unix sockets. Loopback/socket only — never
 | **Secrets** | **macOS Keychain via `keyring`** | Never in files/DB. See §6. |
 | **DB at rest** | **encrypted** | Memory holds owner-sensitive context; encrypt the on-disk store. |
 | **Always-on** | **`launchd`** | Native supervision/restart; the daemon lives here, not a container. |
-| **Model backend** | **Bifrost** (Anthropic/OpenAI-compatible) behind a **provider-agnostic adapter** | Pattern's gateway (base_url + key via `.env`). Swappable backend; Router picks the tier. |
+| **Model backend** | **Model gateway** (Anthropic/OpenAI-compatible) behind a **provider-agnostic adapter** | Any compatible gateway (base_url + key via `.env`). Swappable backend; Router picks the tier. |
 | **STT + wake word** | **local** — `faster-whisper` (STT) + `openWakeWord` (wake) | Privacy + latency; no cloud round-trip to start listening. |
 | **TTS** | **pluggable adapter** — **ElevenLabs primary**, local **Piper / XTTS** fallback | Owner wants ElevenLabs-level quality; adapter keeps engine a config choice (also the fix for the legally-gray voice-cloning concern — never load-bearing). |
 | **Docker** | only for a **stateful backend if one is needed** (e.g. Neo4j) | Voice + desktop-control + menu-bar **must be native** — mic, `osascript`, app launching can't run in a container. `docker` (Rancher) is present. |
@@ -191,22 +191,22 @@ a future control client can't speak unix sockets. Loopback/socket only — never
 ### 6.1 Secrets boundary 🔒
 
 EDITH will **read the owner's `CLAUDE.md`, which contains LIVE credentials** (OAuth client
-secrets and refresh tokens). "Store everything" + a persistent DB + Bifrost calls means creds
+secrets and refresh tokens). "Store everything" + a persistent DB + gateway calls means creds
 could be persisted to disk or shipped over the wire. That must not happen.
 
 - **Never-persist list:** OAuth tokens, client secrets, API keys, passwords, private keys,
   `.env` values, anything read out of a `CLAUDE.md`/`.env`/Keychain. These are never written
   to the graph, the vector store, logs, or the bus.
 - **Redact before every model call:** `Guard.redact(payload)` runs on *all* outbound model
-  payloads. A credential never leaves the machine in a Bifrost request.
-- **Keychain, not files:** EDITH's own secrets (Bifrost key, ElevenLabs key) live in the
+  payloads. A credential never leaves the machine in a gateway request.
+- **Keychain, not files:** EDITH's own secrets (gateway key, ElevenLabs key) live in the
   **macOS Keychain** via `keyring`. Loaded into memory at use, never logged.
 - **Encryption at rest:** the Memory store is encrypted on disk.
 
 ### 6.2 Cost / token governance
 
 An always-on daemon narrating every terminal is a textbook silent token-burner — even with
-generous Bifrost limits. Governance is mandatory, not optional.
+generous gateway limits. Governance is mandatory, not optional.
 
 - **Budget:** a per-window token/cost budget tracked by Guard; `status` surfaces usage.
 - **Per-event gating:** most bus events are handled **locally** (pattern match, cached state,
@@ -251,7 +251,7 @@ and deepened when their build session begins.
 | 2 | **PR-review skill** | First real autonomous action: find + review a PR, ask when unsure. | Skill `run(context)->result`; reads repos/Slack; ASK-gated on any write. | Interface |
 | 3 | **Voice** | Wake word + STT in, Jarvis-style TTS out. | VoiceIO: emits `voice.wake`/`voice.utterance`; `speak(text)`. | Interface |
 | 4 | **Session awareness** | Watch every OMC / Claude Code terminal; narrate. **Highest uncertainty — to prototype.** | SessionBus ingests OMC/CC events → `session.event`/`session.state`. | Interface (verify event source first) |
-| 5 | **Router** | Tiered model selection over Bifrost; two-call latency masking. | `model_call(messages, tier_hint)->response`. | Interface |
+| 5 | **Router** | Tiered model selection over the gateway; two-call latency masking. | `model_call(messages, tier_hint)->response`. | Interface |
 | 6 | **Desktop control** | Voice-launch apps, drive terminals (`osascript`). | Skill(s) `run(context)`; ASK-gated on destructive shell. | Interface |
 
 ```

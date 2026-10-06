@@ -24,7 +24,7 @@ from enum import Enum
 class Tier(Enum):
     """Model size class the Router selects (spec 05 §Tier selection).
 
-    Defined here (the tier-selection module) so ``bifrost.py`` can import it without a
+    Defined here (the tier-selection module) so ``gateway.py`` can import it without a
     cycle; re-exported from ``edith.router`` so callers are unaffected.
     """
 
@@ -114,7 +114,7 @@ def resolve_tier(
     return TierDecision(Tier.SONNET)
 
 
-# Tier → Bifrost model id. ONE map, read by every entry point.
+# Tier → gateway model id. ONE map, read by every entry point.
 #
 # Previously duplicated in edith/daemon/__main__.py and edith/voice/__main__.py, with a
 # TODO(config) flagging the drift risk — which then bit: the two entry points had to be
@@ -130,14 +130,14 @@ _DEFAULT_MODELS: dict[Tier, str] = {
 }
 
 _MODEL_ENV_VARS: dict[Tier, str] = {
-    Tier.HAIKU: "BIFROST_MODEL_HAIKU",
-    Tier.SONNET: "BIFROST_MODEL_SONNET",
-    Tier.OPUS: "BIFROST_MODEL_OPUS",
+    Tier.HAIKU: "EDITH_MODEL_HAIKU",
+    Tier.SONNET: "EDITH_MODEL_SONNET",
+    Tier.OPUS: "EDITH_MODEL_OPUS",
 }
 
 
 def resolve_models() -> dict[Tier, str]:
-    """The tier→model map, with per-tier ``BIFROST_MODEL_*`` env overrides applied."""
+    """The tier→model map, with per-tier ``EDITH_MODEL_*`` env overrides applied."""
     return {
         tier: os.environ.get(_MODEL_ENV_VARS[tier], default)
         for tier, default in _DEFAULT_MODELS.items()

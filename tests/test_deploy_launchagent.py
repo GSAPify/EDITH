@@ -111,7 +111,7 @@ def test_no_credential_in_the_raw_plist_including_xml_comments() -> None:
     """Scan the raw bytes, not just parsed values.
 
     ``plistlib`` discards XML comments, and a comment is exactly where someone debugging a
-    launchd startup would paste a real key ("<!-- try BIFROST_API_KEY=sk-... -->"). The parsed
+    launchd startup would paste a real key ("<!-- try EDITH_GATEWAY_API_KEY=sk-... -->"). The parsed
     scan above cannot see it; this can.
     """
     for line in _PLIST_PATH.read_text().splitlines():
@@ -151,7 +151,7 @@ def test_wrapper_refuses_a_world_readable_env(tmp_path: Path) -> None:
     """A 0644 .env must abort the boot, not leak the key.
 
     `source` executes the file, so a writable .env is RCE as the owner at login; a readable
-    one hands BIFROST_API_KEY to any other local account. This was live on the build machine
+    one hands EDITH_GATEWAY_API_KEY to any other local account. This was live on the build machine
     (.env 0644, a second uid able to traverse to it). Documenting a chmod is not enough —
     without this check the permission silently drifts back and nothing complains.
     """

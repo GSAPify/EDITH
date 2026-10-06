@@ -5,7 +5,7 @@ One pass on a ``voice.utterance`` (spec 01 §"The core loop"):
   1. RECALL     — Memory.recall(utterance) pulls the relevant slice of the graph.
   2. ASSEMBLE   — system preamble + recalled facts + the utterance -> messages.
   3. REDACT     — sanitize_text over every message (never-persist / §6.1) so a
-                  credential never reaches Router / Bifrost.
+                  credential never reaches Router / gateway.
   4. DECIDE     — Router.model_call(messages, tier) for the answer (single-tier
                   passthrough; the Guard authorize/budget gates are later work).
   5. REMEMBER   — write the exchange (utterance + answer) back to Memory; the
@@ -472,7 +472,7 @@ def _assemble(
 
     Recalled facts ride the USER turn, not the system preamble. They are the most
     volatile thing in the prompt — a different recall on every turn — and the system
-    preamble is the prompt-cache breakpoint (``bifrost._split_system``). Caching is a
+    preamble is the prompt-cache breakpoint (``gateway._split_system``). Caching is a
     prefix match, so folding per-turn facts into the preamble changed the cached bytes
     on every single turn: a guaranteed miss, paying the write premium forever and never
     reading. Keeping the preamble byte-stable is what makes the breakpoint worth having.

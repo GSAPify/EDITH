@@ -56,7 +56,7 @@ def test_redact_docs_strips_secret_from_claude_md() -> None:
         name="portal",
         path="/x/portal",
         readme="ordinary readme",
-        claude_md=f"BIFROST_API_KEY={_PLANTED}",
+        claude_md=f"EDITH_GATEWAY_API_KEY={_PLANTED}",
         metadata={"description": f"leaky token {_PLANTED}"},
     )
 
@@ -72,7 +72,7 @@ def _repo_with_planted_secret(tmp_path: Path) -> tuple[Path, DiscoveredRepo]:
     (repo / ".claude").mkdir(parents=True)
     (repo / "README.md").write_text("# Portal\nOnboarding portal.")
     (repo / ".claude" / "CLAUDE.md").write_text(
-        f"# rules\nBIFROST_API_KEY={_PLANTED}\nUse the ingest pipeline."
+        f"# rules\nEDITH_GATEWAY_API_KEY={_PLANTED}\nUse the ingest pipeline."
     )
     discovered = DiscoveredRepo(
         name="portal",

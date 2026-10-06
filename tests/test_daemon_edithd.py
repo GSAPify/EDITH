@@ -89,7 +89,7 @@ class MemoryNoCompact:
 def _daemon(data_dir: Path, memory, router) -> EdithDaemon:  # noqa: ANN001
     return EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=memory,
         router=router,
     )
@@ -203,7 +203,7 @@ async def test_injected_resolve_repo_is_wired_to_brain(data_dir):
 
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),  # recall -> [] (a miss)
         router=FakeRouter(),
         resolve_repo=fake_resolver,
@@ -228,7 +228,7 @@ async def test_real_memorystore_gets_a_default_resolver(data_dir, tmp_path):
     store = MemoryStore(str(tmp_path / "m.kuzu"))
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=store,
         router=FakeRouter(),
     )
@@ -336,13 +336,13 @@ def test_resolve_secrets_falls_back_to_env_on_keyring_miss(monkeypatch):
     monkeypatch.setattr(
         "edith.daemon.edithd.keyring.get_password", lambda service, user: None
     )
-    monkeypatch.setenv("BIFROST_API_KEY", "env-key")
-    monkeypatch.setenv("BIFROST_BASE_URL", "https://env.example")
+    monkeypatch.setenv("EDITH_GATEWAY_API_KEY", "env-key")
+    monkeypatch.setenv("EDITH_GATEWAY_URL", "https://env.example")
 
     secrets = resolve_secrets()
 
-    assert secrets.bifrost_api_key == "env-key"
-    assert secrets.bifrost_base_url == "https://env.example"
+    assert secrets.gateway_api_key == "env-key"
+    assert secrets.gateway_url == "https://env.example"
 
 
 def test_resolve_secrets_prefers_keyring(monkeypatch):
@@ -350,17 +350,17 @@ def test_resolve_secrets_prefers_keyring(monkeypatch):
         "edith.daemon.edithd.keyring.get_password",
         lambda service, user: "keychain-key" if "key" in user else "https://kc.example",
     )
-    monkeypatch.delenv("BIFROST_API_KEY", raising=False)
+    monkeypatch.delenv("EDITH_GATEWAY_API_KEY", raising=False)
 
     secrets = resolve_secrets()
 
-    assert secrets.bifrost_api_key == "keychain-key"
+    assert secrets.gateway_api_key == "keychain-key"
 
 
 def test_secrets_repr_does_not_expose_the_api_key():
     # dataclass's default __repr__ prints every field's value -- a bare log/print/f-string
     # of a Secrets instance (or anything holding one) must not leak the key.
-    secrets = Secrets(bifrost_api_key="super-secret-key", bifrost_base_url="https://x")
+    secrets = Secrets(gateway_api_key="super-secret-key", gateway_url="https://x")
 
     assert "super-secret-key" not in repr(secrets)
 
@@ -399,7 +399,7 @@ async def test_graph_refresh_runs_the_injected_callable_on_interval(data_dir):
 
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=FakeRouter(),
         enable_graph_refresh=True,
@@ -422,7 +422,7 @@ async def test_graph_refresh_skips_a_cycle_while_paused(data_dir):
 
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=FakeRouter(),
         enable_graph_refresh=True,
@@ -456,7 +456,7 @@ async def test_graph_refresh_in_progress_makes_brain_skip_a_turn(data_dir):
     memory = SpyMemory()
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=memory,
         router=router,
         enable_graph_refresh=True,
@@ -498,7 +498,7 @@ async def test_graph_refresh_error_does_not_kill_the_loop(data_dir):
 
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=FakeRouter(),
         enable_graph_refresh=True,
@@ -532,7 +532,7 @@ async def test_stop_joins_an_in_flight_refresh_before_closing_memory(data_dir):
 
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=memory,
         router=FakeRouter(),
         enable_graph_refresh=True,
@@ -555,7 +555,7 @@ async def test_stop_joins_an_in_flight_refresh_before_closing_memory(data_dir):
 async def test_stop_cancels_the_graph_refresh_task(data_dir):
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=FakeRouter(),
         enable_graph_refresh=True,
@@ -695,7 +695,7 @@ async def test_start_voice_loop_resets_voice_health_to_healthy(data_dir, monkeyp
 
     daemon = EdithDaemon(
         data_dir=data_dir,
-        secrets=Secrets(bifrost_api_key="k", bifrost_base_url="https://x"),
+        secrets=Secrets(gateway_api_key="k", gateway_url="https://x"),
         memory=SpyMemory(),
         router=FakeRouter(),
         voice=_FakeVoice(),

@@ -10,7 +10,7 @@ from edith.memory.secrets import contains_secret, sanitize_text
 
 def test_detects_common_secret_shapes():
     assert contains_secret("client_secret: GOCSPX-EXAMPLE_FAKE_SECRET_DO_NOT_STORE")
-    assert contains_secret("BIFROST_API_KEY=sk-proj-abc123def456ghi789")
+    assert contains_secret("EDITH_GATEWAY_API_KEY=sk-proj-abc123def456ghi789")
     assert contains_secret("refresh_token: 1//0gFAKErefreshTokenValueThatIsLong")
     assert contains_secret("-----BEGIN PRIVATE KEY-----")
     assert contains_secret("password = hunter2hunter2")

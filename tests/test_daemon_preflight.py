@@ -91,7 +91,7 @@ def test_speech_prefers_elevenlabs_then_piper() -> None:
 
 def test_gateway_never_echoes_the_key() -> None:
     check = check_gateway(
-        {"BIFROST_BASE_URL": "https://gw.example", "BIFROST_API_KEY": "sk-secret"}
+        {"EDITH_GATEWAY_URL": "https://gw.example", "EDITH_GATEWAY_API_KEY": "sk-secret"}
     )
     assert check.ok
     assert "sk-secret" not in check.detail + check.fix + check.name

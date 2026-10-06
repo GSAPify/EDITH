@@ -35,7 +35,7 @@ from enum import Enum
 from itertools import count
 from typing import Protocol
 
-from edith.router.bifrost import (
+from edith.router.gateway import (
     _DEFAULT_MAX_TOKENS,
     MODEL_CALL_ERRORS,
     BudgetCheck,

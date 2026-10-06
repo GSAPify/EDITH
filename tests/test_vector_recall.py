@@ -1,7 +1,7 @@
 """Semantic recall over Kuzu's native HNSW vector index.
 
 Real Kuzu VECTOR extension + a real local embedding (fastembed all-MiniLM-L6-v2,
-384-dim, offline). No Bifrost, no cloud. The index is static: built after the
+384-dim, offline). No gateway, no cloud. The index is static: built after the
 embeddable rows are inserted, then queried.
 """
 
