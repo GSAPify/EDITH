@@ -438,9 +438,8 @@ python -c "from edith.bus import publish; publish('voice.utterance', {'text': 'r
   `ruff check` clean, `pyright` 0 errors. Mandatory tests confirmed non-vacuous by reading
   source: `test_declined_never_posts` (confirm→False ⇒ `review_calls == []`) and
   `test_planted_secret_redacted_before_router` (asserts secrets present in raw diff, absent from
-  the Router payload). **LIVE smoke:** real `gh` + real Opus against `patterninc/agents`
-  PR #2423 (kemenyc, +28/-2), `confirm=deny` — Opus produced a genuine review (caught a real
-  always-on→toggle-gated regression), `posted=False`, and the recorded `gh` calls were exactly
+  the Router payload). **LIVE smoke:** real `gh` + real Opus against a real
+  PR (+28/-2), `confirm=deny`. Opus produced a genuine review (caught a real regression), `posted=False`, and the recorded `gh` calls were exactly
   `pr list` + `pr diff` with **zero** `pr review` write.
 - **Follow-ups / known gaps:**
   - **Resolution against the real graph currently ALWAYS asks** (verified live on the 206-node
